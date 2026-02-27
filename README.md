@@ -1,6 +1,6 @@
 # chuchu_hack meow
 
-生草系统 **爬虫式** 自动化：自动过载生巨草，生完后写入**信号文件**，不依赖 QQ。
+生草系统 **爬虫式** 自动化：自动登录 → 进入生草页 → 选择巨草 → 过载生草，生完后写入**信号文件**，不依赖 QQ。
 
 ## 环境
 
@@ -14,13 +14,33 @@ playwright install chromium
 
 ## 运行方式
 
-### 单次爬取（默认）
+### 单次爬取（默认，自动巨草）
 
 ```bash
 python kusa_auto.py
 ```
 
-打开页面 → 点「过载/生巨草」→ 轮询直到检测到完成 → 写入 `kusa_done.json` 并退出。
+流程：打开页面 → 自动输入 QQ 登录 → 进入生草 → 恢复承载力 → 选择巨草 → 点击「过载生草」→ 轮询直到检测到完成 → 写入 `kusa_done.json` 并退出。
+
+默认 QQ 号在 `kusa_auto.py` 里的 `LOGIN_QQ` 常量中，如需更换登录账号，请修改该值。
+
+默认游戏 URL 为 `http://110.41.149.62/kusa`，可通过：
+
+- 环境变量：`KUSA_GAME_URL`
+- 或命令行参数：`--url`
+
+覆盖，例如：
+
+```bash
+set KUSA_GAME_URL=http://example.com/kusa
+python kusa_auto.py
+```
+
+或：
+
+```bash
+python kusa_auto.py --url http://example.com/kusa
+```
 
 显示浏览器窗口（方便调试）：
 
@@ -35,20 +55,19 @@ set HEADLESS=true
 python kusa_auto.py
 ```
 
-### 循环爬取（类似定时爬虫）
+### 循环爬取（自动多轮过载生巨草）
 
-每隔一段时间自动执行一轮，生完就写一次信号文件，然后继续下一轮：
+自动执行多轮过载生巨草：每轮按照「登录 → 巨草 → 过载生草」流程执行一次，生完写一次信号文件，然后等待下一轮可用时继续。
 
 ```bash
 python kusa_auto.py --loop
 ```
 
-默认间隔 300 秒，可通过环境变量改：
+当前逻辑（基于实际冷却时间约 5–7 分钟）：
 
-```bash
-set KUSA_LOOP_SEC=180
-python kusa_auto.py --loop
-```
+1. 完成一轮过载生草后，先**固定等待 5 分钟**；
+2. 之后每隔 **1 分钟** 重新打开页面检查一次「过载生草」按钮是否重新出现；
+3. 一旦检测到按钮出现，就立即开始下一轮完整流程。
 
 ## 接收「生完草」信号（不用 QQ）
 
@@ -74,10 +93,11 @@ python kusa_auto.py --loop
 
 ## 若页面结构不同
 
-若游戏改版或选择器对不上：
+若游戏改版或选择器对不上（或按钮文字变化）：
 
 1. 运行一次后若未找到按钮，会生成 `kusa_debug.html`，根据其内容改 `kusa_auto.py` 里的：
-   - `TRIGGER_SELECTORS`：触发过载/生巨草的按钮；
+   - `TAB_SELECTORS`：进入生草页面的入口（侧边栏「生草」等）；
+   - `TRIGGER_SELECTORS`：触发过载生草的按钮（目前只点「过载生草」）；
    - `DONE_INDICATORS`：认为「生完草」的页面元素或文字。
 2. 选择器语法见 [Playwright 文档](https://playwright.dev/python/docs/selectors)。
 

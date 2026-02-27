@@ -23,29 +23,24 @@ except ImportError:
 # ---------- 配置 ----------
 # 默认 URL；可从环境变量 KUSA_GAME_URL 覆盖（仅在此处读取一次，避免重复 env 开销）
 _DEFAULT_GAME_URL = "http://110.41.149.62/kusa"
+# 固定登录用 QQ 号（如需修改，直接改这里或后续扩展为从环境变量读取）
+LOGIN_QQ = "530958461"
 # 生完草后写入的信号文件（用这个文件就知道「生完了」）
 SIGNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kusa_done.json")
 HEADLESS = os.environ.get("HEADLESS", "false").lower() in ("1", "true", "yes")
-# 先点击「生草」tab，再在 tab 内找按钮
+# 页面中「生草」入口（可以在左侧菜单、顶部导航等任意位置）
 TAB_SELECTORS = [
-    '[role="tab"]:has-text("生草")',
+    'li.el-menu-item:has-text("生草")',
+    '[role="menuitem"]:has-text("生草")',
     'a:has-text("生草")',
     'button:has-text("生草")',
-    '.tab:has-text("生草")',
-    '[class*="tab"]:has-text("生草")',
+    'text=生草',
 ]
-# 在生草 tab 里找「过载生草」「巨草」按钮
+# 进入生草页后，只找「过载生草」按钮
 TRIGGER_SELECTORS = [
     'button:has-text("过载生草")',
     'a:has-text("过载生草")',
-    'button:has-text("巨草")',
-    'a:has-text("巨草")',
-    'button:has-text("过载")',
-    'a:has-text("过载")',
-    'button:has-text("生巨草")',
-    'a:has-text("生巨草")',
-    '[class*="overload"]',
-    '[class*="big-grass"]',
+    '[class*="overload"]:has-text("过载生草")',
 ]
 DONE_INDICATORS = [
     'text=生完',
@@ -105,22 +100,82 @@ async def run_once(p, headless: bool, game_url: str) -> bool:
 
     await asyncio.sleep(2)
 
-    # 先尝试点击「生草」tab
+    # 如在登录页，先自动输入 QQ 并点击登录，再进行后续「生草」tab 和按钮查找
+    try:
+        qq_input = page.locator('input[placeholder="请输入QQ号"]').first
+        login_button = page.locator('button:has-text("登录")').first
+        if await qq_input.is_visible() and await login_button.is_visible():
+            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
+            await qq_input.fill(LOGIN_QQ)
+            await login_button.click()
+            # 等待登录完成并进入主界面
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+    except Exception:
+        # 如果没有登录表单或操作失败，继续后续流程（可能已登录）
+        pass
+
+    # 尝试先点击页面上的「生草」入口（侧边栏 / 顶部导航等），然后再找「过载生草」按钮
+    tab_clicked = False
     for tab_sel in TAB_SELECTORS:
         try:
             if await page.locator(tab_sel).first.is_visible():
-                print("[爬虫] 点击生草 tab:", tab_sel)
+                print("[爬虫] 点击生草入口:", tab_sel)
                 await page.click(tab_sel)
-                await asyncio.sleep(1)
+                tab_clicked = True
                 break
         except Exception:
             continue
+
+    if tab_clicked:
+        # 等待生草页面内容加载
+        await asyncio.sleep(2)
+    else:
+        print("未在导航中找到「生草」入口，将直接在当前页面查找「过载生草」按钮")
+
+    # 在选择草种为「巨草」之前，优先点击一次「恢复承载力」（如果按钮可见）
+    try:
+        for sel in RESTORE_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible():
+                    print("[爬虫] 预先点击恢复承载力按钮:", sel)
+                    await btn.click()
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        # 如果找不到或点击失败，忽略，继续后续流程
+        pass
+
+    # 然后在页面里强行把草种参数改写成「巨草」：无论下拉怎么选，plantKusa 一律用「巨草」
+    try:
+        await page.evaluate(
+            "() => {\
+                try {\
+                    if (window.S && typeof window.S.plantKusa === 'function' && !window.S._kusaAutoPatched) {\
+                        const orig = window.S.plantKusa.bind(window.S);\
+                        window.S.plantKusa = async function (_type, ...rest) {\
+                            return await orig('巨草', ...rest);\
+                        };\
+                        window.S._kusaAutoPatched = true;\
+                        console.log('[kusa_auto] patched S.plantKusa to always use 巨草');\
+                    }\
+                    window.localStorage && window.localStorage.setItem('lastKusaType', '巨草');\
+                } catch (e) { console.error('[kusa_auto] patch error', e); }\
+            }"
+        )
+        print("[爬虫] 已强制将 plantKusa 的草种参数改写为「巨草」")
+        await asyncio.sleep(2)
+    except Exception as e:
+        print(f"[爬虫] 强制改写 plantKusa 草种参数为巨草时出错，跳过草种强制切换: {e}")
 
     triggered = False
     for sel in TRIGGER_SELECTORS:
         try:
             if await page.locator(sel).first.is_visible():
-                print("[爬虫] 点击触发:", sel)
+                print("[爬虫] 点击过载生草按钮:", sel)
                 await page.click(sel)
                 triggered = True
                 break
@@ -128,7 +183,7 @@ async def run_once(p, headless: bool, game_url: str) -> bool:
             continue
 
     if not triggered:
-        print("未找到过载/生巨草按钮，保存页面到 kusa_debug.html")
+        print("在生草 tab 内未找到「过载生草」按钮，保存页面到 kusa_debug.html")
         with open("kusa_debug.html", "w", encoding="utf-8") as f:
             f.write(await page.content())
         await browser.close()
@@ -171,15 +226,89 @@ async def run_once(p, headless: bool, game_url: str) -> bool:
     return bool(done_selector)
 
 
+async def is_overload_available(p, headless: bool, game_url: str) -> bool:
+    """检查页面上是否已经可以再次点击「过载生草」按钮（用于 loop 轮询）。"""
+    browser = await p.chromium.launch(headless=headless)
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 720},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(game_url, wait_until="networkidle", timeout=15000)
+    except Exception as e:
+        print("检查过载生草可用性时打开页面失败:", e)
+        await browser.close()
+        return False
+
+    await asyncio.sleep(2)
+
+    # 如在登录页，先自动登录
+    try:
+        qq_input = page.locator('input[placeholder="请输入QQ号"]').first
+        login_button = page.locator('button:has-text("登录")').first
+        if await qq_input.is_visible() and await login_button.is_visible():
+            print("[轮询] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
+            await qq_input.fill(LOGIN_QQ)
+            await login_button.click()
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+    except Exception:
+        pass
+
+    # 尝试点击一次「生草」入口，保证在生草页面上检查按钮
+    try:
+        for tab_sel in TAB_SELECTORS:
+            try:
+                if await page.locator(tab_sel).first.is_visible():
+                    print("[轮询] 点击生草入口:", tab_sel)
+                    await page.click(tab_sel)
+                    await asyncio.sleep(2)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 只检查是否能看见「过载生草」按钮，不做点击
+    for sel in TRIGGER_SELECTORS:
+        try:
+            if await page.locator(sel).first.is_visible():
+                print("[轮询] 检测到过载生草按钮已重新出现:", sel)
+                await browser.close()
+                return True
+        except Exception:
+            continue
+
+    await browser.close()
+    return False
+
+
 async def main_loop(headless: bool, game_url: str):
-    """循环模式：每轮结束后等 LOOP_INTERVAL 秒（默认 5 分钟）再开始下一轮。"""
-    print("爬虫循环模式，每轮结束后等待", LOOP_INTERVAL, "秒再下一轮，Ctrl+C 退出")
+    """循环模式：完成一次过载生草后，等按钮刷新再自动下一轮。"""
+    print("爬虫循环模式：完成一次过载生草后，将等待按钮刷新再自动下一轮，Ctrl+C 退出")
     async with async_playwright() as p:
         while True:
             clear_signal()
-            await run_once(p, headless, game_url)
-            print("下一轮在", LOOP_INTERVAL, "秒后...")
-            await asyncio.sleep(LOOP_INTERVAL)
+            ok = await run_once(p, headless, game_url)
+            if not ok:
+                print("本轮未检测到完成，60 秒后重试整轮过载生草...")
+                await asyncio.sleep(60)
+                continue
+
+            # 用户说明两次过载生草按钮出现间隔约 5–7 分钟：
+            # 先固定等待 5 分钟，然后每隔 1 分钟轮询一次按钮是否重新出现。
+            print("本轮过载生草完成，先等待 5 分钟再开始轮询按钮刷新...")
+            await asyncio.sleep(300)
+
+            while True:
+                print("轮询检查「过载生草」按钮是否已刷新可用...")
+                available = await is_overload_available(p, headless, game_url)
+                if available:
+                    print("检测到按钮已刷新，开始下一轮过载生草。")
+                    break
+                print("按钮尚未刷新，1 分钟后再次检查...")
+                await asyncio.sleep(60)
 
 
 async def main_once(headless: bool, game_url: str):
