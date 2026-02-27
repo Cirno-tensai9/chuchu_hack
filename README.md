@@ -69,6 +69,35 @@ python kusa_auto.py --loop
 2. 之后每隔 **1 分钟** 重新打开页面检查一次「过载生草」按钮是否重新出现；
 3. 一旦检测到按钮出现，就立即开始下一轮完整流程。
 
+### 可配置版（草种 / 等待时间 / 轮询间隔 / 过载或开始生草）
+
+`kusa_auto_config.py` 在原有流程基础上支持通过命令行自定义：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--kusa-type` | 巨草 | 草种（如 巨草、草 等） |
+| `--wait-min` | 5 | 循环时每轮完成后先等待的**分钟**数 |
+| `--poll-min` | 1 | 等待结束后，每隔多少**分钟**检查一次按钮是否出现 |
+| `--trigger` | 过载生草 | 点击的按钮：`过载生草` 或 `开始生草` |
+
+同时支持 `--url`、`--loop`、`--no-headless`（与 `kusa_auto.py` 相同）。
+
+示例：
+
+```bash
+# 默认：巨草 + 过载生草，单次
+python kusa_auto_config.py
+
+# 草种「草」，点击「开始生草」
+python kusa_auto_config.py --kusa-type 草 --trigger 开始生草
+
+# 循环：先等 5 分钟，再每 1 分钟检查（等同默认）
+python kusa_auto_config.py --loop
+
+# 循环：先等 3 分钟，再每 2 分钟检查，使用「开始生草」
+python kusa_auto_config.py --loop --wait-min 3 --poll-min 2 --trigger 开始生草
+```
+
 ## 接收「生完草」信号（不用 QQ）
 
 生完后脚本会：

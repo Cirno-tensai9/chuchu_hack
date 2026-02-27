@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+生草系统 爬虫式自动化（可配置版）
+在 kusa_auto.py 基础上支持：选定草种（默认巨草）、等待时间（默认5分钟）、
+等待后轮询间隔（默认1分钟）、触发方式（默认「过载生草」或「开始生草」）。
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from datetime import datetime
+
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    print("请先安装: pip install playwright && playwright install chromium")
+    sys.exit(1)
+
+# ---------- 配置（可被命令行覆盖）----------
+_DEFAULT_GAME_URL = "http://110.41.149.62/kusa"
+LOGIN_QQ = "530958461"
+SIGNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kusa_done.json")
+HEADLESS = os.environ.get("HEADLESS", "false").lower() in ("1", "true", "yes")
+
+TAB_SELECTORS = [
+    'li.el-menu-item:has-text("生草")',
+    '[role="menuitem"]:has-text("生草")',
+    'a:has-text("生草")',
+    'button:has-text("生草")',
+    'text=生草',
+]
+
+# 根据 trigger_mode 动态生成，见下方 get_trigger_selectors()
+DONE_INDICATORS = [
+    'text=生完',
+    'text=完成',
+    'text=巨草',
+    '[class*="done"]',
+    '[class*="complete"]',
+]
+RESTORE_SELECTORS = [
+    'button:has-text("恢复承载力")',
+    'a:has-text("恢复承载力")',
+    '[class*="restore"]:has-text("恢复承载力")',
+]
+FAST_POLL = 2.0
+SLOW_POLL = 60.0
+SLOW_AFTER = 300
+MAX_WAIT = 600
+
+
+def get_trigger_selectors(trigger_mode: str):
+    """trigger_mode: '过载生草' 或 '开始生草'"""
+    if trigger_mode == "开始生草":
+        return [
+            'button:has-text("开始生草")',
+            'a:has-text("开始生草")',
+        ]
+    # 默认 过载生草
+    return [
+        'button:has-text("过载生草")',
+        'a:has-text("过载生草")',
+        '[class*="overload"]:has-text("过载生草")',
+    ]
+
+
+def write_done_signal(done_selector: str = "", trigger_mode: str = "过载生草"):
+    data = {
+        "done": True,
+        "at": datetime.now().isoformat(),
+        "message": f"{trigger_mode}已完成",
+        "detected_by": done_selector or "unknown",
+    }
+    with open(SIGNAL_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print("[信号] 已写入:", SIGNAL_FILE)
+
+
+def clear_signal():
+    if os.path.exists(SIGNAL_FILE):
+        os.remove(SIGNAL_FILE)
+
+
+async def run_once(
+    p,
+    headless: bool,
+    game_url: str,
+    kusa_type: str = "巨草",
+    trigger_mode: str = "过载生草",
+) -> bool:
+    trigger_selectors = get_trigger_selectors(trigger_mode)
+    browser = await p.chromium.launch(headless=headless)
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 720},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(game_url, wait_until="networkidle", timeout=15000)
+    except Exception as e:
+        print("打开页面失败:", e)
+        await browser.close()
+        return False
+
+    await asyncio.sleep(2)
+
+    try:
+        qq_input = page.locator('input[placeholder="请输入QQ号"]').first
+        login_button = page.locator('button:has-text("登录")').first
+        if await qq_input.is_visible() and await login_button.is_visible():
+            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
+            await qq_input.fill(LOGIN_QQ)
+            await login_button.click()
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+    except Exception:
+        pass
+
+    tab_clicked = False
+    for tab_sel in TAB_SELECTORS:
+        try:
+            if await page.locator(tab_sel).first.is_visible():
+                print("[爬虫] 点击生草入口:", tab_sel)
+                await page.click(tab_sel)
+                tab_clicked = True
+                break
+        except Exception:
+            continue
+
+    if tab_clicked:
+        await asyncio.sleep(2)
+    else:
+        print("未在导航中找到「生草」入口，将直接在当前页面查找按钮")
+
+    try:
+        for sel in RESTORE_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible():
+                    print("[爬虫] 预先点击恢复承载力按钮:", sel)
+                    await btn.click()
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 强制将 plantKusa 的草种参数改为用户指定的 kusa_type
+    kusa_escaped = kusa_type.replace("\\", "\\\\").replace("'", "\\'")
+    try:
+        await page.evaluate(
+            f"""() => {{
+                try {{
+                    if (window.S && typeof window.S.plantKusa === 'function' && !window.S._kusaAutoPatched) {{
+                        const orig = window.S.plantKusa.bind(window.S);
+                        const kusaType = '{kusa_escaped}';
+                        window.S.plantKusa = async function (_type, ...rest) {{
+                            return await orig(kusaType, ...rest);
+                        }};
+                        window.S._kusaAutoPatched = true;
+                        console.log('[kusa_auto_config] patched S.plantKusa to always use', kusaType);
+                    }}
+                    window.localStorage && window.localStorage.setItem('lastKusaType', '{kusa_escaped}');
+                }} catch (e) {{ console.error('[kusa_auto_config] patch error', e); }}
+            }}"""
+        )
+        print(f"[爬虫] 已强制将 plantKusa 的草种参数改写为「{kusa_type}」")
+        await asyncio.sleep(2)
+    except Exception as e:
+        print(f"[爬虫] 强制改写 plantKusa 草种参数时出错: {e}")
+
+    triggered = False
+    for sel in trigger_selectors:
+        try:
+            if await page.locator(sel).first.is_visible():
+                print(f"[爬虫] 点击 {trigger_mode} 按钮:", sel)
+                await page.click(sel)
+                triggered = True
+                break
+        except Exception:
+            continue
+
+    if not triggered:
+        print(f"未找到「{trigger_mode}」按钮，保存页面到 kusa_debug.html")
+        with open("kusa_debug.html", "w", encoding="utf-8") as f:
+            f.write(await page.content())
+        await browser.close()
+        return False
+
+    deadline = time.monotonic() + MAX_WAIT
+    t0 = time.monotonic()
+    done_selector = ""
+    while time.monotonic() < deadline:
+        for ind in DONE_INDICATORS:
+            try:
+                if await page.locator(ind).first.is_visible():
+                    done_selector = ind
+                    break
+            except Exception:
+                continue
+        if done_selector:
+            break
+        elapsed = time.monotonic() - t0
+        interval = FAST_POLL if elapsed < SLOW_AFTER else SLOW_POLL
+        await asyncio.sleep(interval)
+
+    if done_selector:
+        print("检测到完成:", done_selector)
+        write_done_signal(done_selector, trigger_mode)
+        for sel in RESTORE_SELECTORS:
+            try:
+                if await page.locator(sel).first.is_visible():
+                    print("[爬虫] 点击:", sel)
+                    await page.click(sel)
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+        else:
+            print("未找到「恢复承载力」按钮")
+    await browser.close()
+    return bool(done_selector)
+
+
+async def is_trigger_available(
+    p, headless: bool, game_url: str, trigger_mode: str = "过载生草"
+) -> bool:
+    trigger_selectors = get_trigger_selectors(trigger_mode)
+    browser = await p.chromium.launch(headless=headless)
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 720},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(game_url, wait_until="networkidle", timeout=15000)
+    except Exception as e:
+        print("检查按钮可用性时打开页面失败:", e)
+        await browser.close()
+        return False
+
+    await asyncio.sleep(2)
+
+    try:
+        qq_input = page.locator('input[placeholder="请输入QQ号"]').first
+        login_button = page.locator('button:has-text("登录")').first
+        if await qq_input.is_visible() and await login_button.is_visible():
+            await qq_input.fill(LOGIN_QQ)
+            await login_button.click()
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+    except Exception:
+        pass
+
+    try:
+        for tab_sel in TAB_SELECTORS:
+            try:
+                if await page.locator(tab_sel).first.is_visible():
+                    await page.click(tab_sel)
+                    await asyncio.sleep(2)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    for sel in trigger_selectors:
+        try:
+            if await page.locator(sel).first.is_visible():
+                print(f"[轮询] 检测到「{trigger_mode}」按钮已重新出现:", sel)
+                await browser.close()
+                return True
+        except Exception:
+            continue
+
+    await browser.close()
+    return False
+
+
+async def main_loop(
+    headless: bool,
+    game_url: str,
+    kusa_type: str = "巨草",
+    trigger_mode: str = "过载生草",
+    wait_sec: int = 300,
+    poll_interval_sec: int = 60,
+):
+    print(
+        f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
+        f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询，Ctrl+C 退出"
+    )
+    async with async_playwright() as p:
+        while True:
+            clear_signal()
+            ok = await run_once(p, headless, game_url, kusa_type, trigger_mode)
+            if not ok:
+                print("本轮未检测到完成，60 秒后重试...")
+                await asyncio.sleep(60)
+                continue
+
+            print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
+            await asyncio.sleep(wait_sec)
+
+            while True:
+                print(f"轮询检查「{trigger_mode}」按钮是否已刷新可用...")
+                available = await is_trigger_available(p, headless, game_url, trigger_mode)
+                if available:
+                    print("检测到按钮已刷新，开始下一轮。")
+                    break
+                print(f"按钮尚未刷新，{poll_interval_sec} 秒后再次检查...")
+                await asyncio.sleep(poll_interval_sec)
+
+
+async def main_once(
+    headless: bool,
+    game_url: str,
+    kusa_type: str = "巨草",
+    trigger_mode: str = "过载生草",
+):
+    async with async_playwright() as p:
+        clear_signal()
+        ok = await run_once(p, headless, game_url, kusa_type, trigger_mode)
+        if not ok:
+            print("本轮未在限定时间内检测到完成")
+        sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="生草系统爬虫（可配置）：草种、等待时间、轮询间隔、过载/开始生草"
+    )
+    parser.add_argument(
+        "--kusa-type",
+        default="巨草",
+        metavar="TYPE",
+        help="草种，如 巨草、草 等（默认: 巨草）",
+    )
+    parser.add_argument(
+        "--wait-min",
+        type=int,
+        default=5,
+        metavar="MIN",
+        help="loop 时每轮完成后先等待的分钟数（默认: 5）",
+    )
+    parser.add_argument(
+        "--poll-min",
+        type=int,
+        default=1,
+        metavar="MIN",
+        help="等待后每隔多少分钟检查一次按钮是否出现（默认: 1）",
+    )
+    parser.add_argument(
+        "--trigger",
+        choices=["过载生草", "开始生草"],
+        default="过载生草",
+        help="点击的按钮：过载生草 或 开始生草（默认: 过载生草）",
+    )
+    parser.add_argument("--loop", action="store_true", help="循环模式")
+    parser.add_argument("--no-headless", action="store_true", help="显示浏览器窗口")
+    parser.add_argument(
+        "--url",
+        default=None,
+        metavar="URL",
+        help="游戏页面 URL（覆盖环境变量 KUSA_GAME_URL）",
+    )
+    args = parser.parse_args()
+    headless = not args.no_headless
+    game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
+    wait_sec = args.wait_min * 60
+    poll_interval_sec = args.poll_min * 60
+
+    if args.loop:
+        asyncio.run(
+            main_loop(
+                headless,
+                game_url,
+                kusa_type=args.kusa_type,
+                trigger_mode=args.trigger,
+                wait_sec=wait_sec,
+                poll_interval_sec=poll_interval_sec,
+            )
+        )
+    else:
+        asyncio.run(
+            main_once(
+                headless,
+                game_url,
+                kusa_type=args.kusa_type,
+                trigger_mode=args.trigger,
+            )
+        )
