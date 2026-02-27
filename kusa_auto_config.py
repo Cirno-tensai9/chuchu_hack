@@ -91,7 +91,9 @@ async def run_once(
     game_url: str,
     kusa_type: str = "巨草",
     trigger_mode: str = "过载生草",
+    login_qq: str = "",
 ) -> bool:
+    qq = login_qq or LOGIN_QQ
     trigger_selectors = get_trigger_selectors(trigger_mode)
     browser = await p.chromium.launch(headless=headless)
     context = await browser.new_context(
@@ -112,8 +114,8 @@ async def run_once(
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
         login_button = page.locator('button:has-text("登录")').first
         if await qq_input.is_visible() and await login_button.is_visible():
-            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
-            await qq_input.fill(LOGIN_QQ)
+            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", qq)
+            await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(2)
@@ -228,8 +230,9 @@ async def run_once(
 
 
 async def is_trigger_available(
-    p, headless: bool, game_url: str, trigger_mode: str = "过载生草"
+    p, headless: bool, game_url: str, trigger_mode: str = "过载生草", login_qq: str = ""
 ) -> bool:
+    qq = login_qq or LOGIN_QQ
     trigger_selectors = get_trigger_selectors(trigger_mode)
     browser = await p.chromium.launch(headless=headless)
     context = await browser.new_context(
@@ -250,7 +253,7 @@ async def is_trigger_available(
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
         login_button = page.locator('button:has-text("登录")').first
         if await qq_input.is_visible() and await login_button.is_visible():
-            await qq_input.fill(LOGIN_QQ)
+            await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(2)
@@ -289,6 +292,7 @@ async def main_loop(
     trigger_mode: str = "过载生草",
     wait_sec: int = 300,
     poll_interval_sec: int = 60,
+    login_qq: str = "",
 ):
     print(
         f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
@@ -297,7 +301,7 @@ async def main_loop(
     async with async_playwright() as p:
         while True:
             clear_signal()
-            ok = await run_once(p, headless, game_url, kusa_type, trigger_mode)
+            ok = await run_once(p, headless, game_url, kusa_type, trigger_mode, login_qq)
             if not ok:
                 print("本轮未检测到完成，60 秒后重试...")
                 await asyncio.sleep(60)
@@ -308,7 +312,7 @@ async def main_loop(
 
             while True:
                 print(f"轮询检查「{trigger_mode}」按钮是否已刷新可用...")
-                available = await is_trigger_available(p, headless, game_url, trigger_mode)
+                available = await is_trigger_available(p, headless, game_url, trigger_mode, login_qq)
                 if available:
                     print("检测到按钮已刷新，开始下一轮。")
                     break
@@ -321,10 +325,11 @@ async def main_once(
     game_url: str,
     kusa_type: str = "巨草",
     trigger_mode: str = "过载生草",
+    login_qq: str = "",
 ):
     async with async_playwright() as p:
         clear_signal()
-        ok = await run_once(p, headless, game_url, kusa_type, trigger_mode)
+        ok = await run_once(p, headless, game_url, kusa_type, trigger_mode, login_qq)
         if not ok:
             print("本轮未在限定时间内检测到完成")
         sys.exit(0 if ok else 1)
@@ -368,9 +373,16 @@ if __name__ == "__main__":
         metavar="URL",
         help="游戏页面 URL（覆盖环境变量 KUSA_GAME_URL）",
     )
+    parser.add_argument(
+        "--qq",
+        default=None,
+        metavar="QQ",
+        help="登录用 QQ 号（覆盖环境变量 KUSA_QQ 和代码内默认值）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
+    login_qq = (args.qq or "").strip() or os.environ.get("KUSA_QQ") or ""
     wait_sec = args.wait_min * 60
     poll_interval_sec = args.poll_min * 60
 
@@ -383,6 +395,7 @@ if __name__ == "__main__":
                 trigger_mode=args.trigger,
                 wait_sec=wait_sec,
                 poll_interval_sec=poll_interval_sec,
+                login_qq=login_qq,
             )
         )
     else:
@@ -392,5 +405,6 @@ if __name__ == "__main__":
                 game_url,
                 kusa_type=args.kusa_type,
                 trigger_mode=args.trigger,
+                login_qq=login_qq,
             )
         )

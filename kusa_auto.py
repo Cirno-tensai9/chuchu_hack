@@ -83,8 +83,9 @@ def clear_signal():
         os.remove(SIGNAL_FILE)
 
 
-async def run_once(p, headless: bool, game_url: str) -> bool:
+async def run_once(p, headless: bool, game_url: str, login_qq: str = "") -> bool:
     """执行一轮：打开页面 → 点触发 → 等完成。返回是否检测到完成。"""
+    qq = login_qq or LOGIN_QQ
     browser = await p.chromium.launch(headless=headless)
     context = await browser.new_context(
         viewport={"width": 1280, "height": 720},
@@ -105,8 +106,8 @@ async def run_once(p, headless: bool, game_url: str) -> bool:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
         login_button = page.locator('button:has-text("登录")').first
         if await qq_input.is_visible() and await login_button.is_visible():
-            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
-            await qq_input.fill(LOGIN_QQ)
+            print("[爬虫] 检测到登录页，自动输入 QQ 并登录:", qq)
+            await qq_input.fill(qq)
             await login_button.click()
             # 等待登录完成并进入主界面
             await page.wait_for_load_state("networkidle")
@@ -226,8 +227,9 @@ async def run_once(p, headless: bool, game_url: str) -> bool:
     return bool(done_selector)
 
 
-async def is_overload_available(p, headless: bool, game_url: str) -> bool:
+async def is_overload_available(p, headless: bool, game_url: str, login_qq: str = "") -> bool:
     """检查页面上是否已经可以再次点击「过载生草」按钮（用于 loop 轮询）。"""
+    qq = login_qq or LOGIN_QQ
     browser = await p.chromium.launch(headless=headless)
     context = await browser.new_context(
         viewport={"width": 1280, "height": 720},
@@ -248,8 +250,8 @@ async def is_overload_available(p, headless: bool, game_url: str) -> bool:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
         login_button = page.locator('button:has-text("登录")').first
         if await qq_input.is_visible() and await login_button.is_visible():
-            print("[轮询] 检测到登录页，自动输入 QQ 并登录:", LOGIN_QQ)
-            await qq_input.fill(LOGIN_QQ)
+            print("[轮询] 检测到登录页，自动输入 QQ 并登录:", qq)
+            await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(2)
@@ -284,13 +286,13 @@ async def is_overload_available(p, headless: bool, game_url: str) -> bool:
     return False
 
 
-async def main_loop(headless: bool, game_url: str):
+async def main_loop(headless: bool, game_url: str, login_qq: str = ""):
     """循环模式：完成一次过载生草后，等按钮刷新再自动下一轮。"""
     print("爬虫循环模式：完成一次过载生草后，将等待按钮刷新再自动下一轮，Ctrl+C 退出")
     async with async_playwright() as p:
         while True:
             clear_signal()
-            ok = await run_once(p, headless, game_url)
+            ok = await run_once(p, headless, game_url, login_qq)
             if not ok:
                 print("本轮未检测到完成，60 秒后重试整轮过载生草...")
                 await asyncio.sleep(60)
@@ -303,7 +305,7 @@ async def main_loop(headless: bool, game_url: str):
 
             while True:
                 print("轮询检查「过载生草」按钮是否已刷新可用...")
-                available = await is_overload_available(p, headless, game_url)
+                available = await is_overload_available(p, headless, game_url, login_qq)
                 if available:
                     print("检测到按钮已刷新，开始下一轮过载生草。")
                     break
@@ -311,11 +313,11 @@ async def main_loop(headless: bool, game_url: str):
                 await asyncio.sleep(60)
 
 
-async def main_once(headless: bool, game_url: str):
+async def main_once(headless: bool, game_url: str, login_qq: str = ""):
     """单次模式：爬一次，生完写信号并退出。"""
     async with async_playwright() as p:
         clear_signal()
-        ok = await run_once(p, headless, game_url)
+        ok = await run_once(p, headless, game_url, login_qq)
         if not ok:
             print("本轮未在限定时间内检测到完成，请检查页面或 DONE_INDICATORS")
         sys.exit(0 if ok else 1)
@@ -335,12 +337,18 @@ if __name__ == "__main__":
         metavar="URL",
         help="游戏页面 URL（覆盖环境变量 KUSA_GAME_URL 和默认值）",
     )
+    parser.add_argument(
+        "--qq",
+        default=None,
+        metavar="QQ",
+        help="登录用 QQ 号（覆盖环境变量 KUSA_QQ 和代码内默认值）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
-    # 仅在此处解析 URL 一次：CLI > 环境变量 > 默认值（无重复 env 查找，无额外内存）
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
+    login_qq = (args.qq or "").strip() or os.environ.get("KUSA_QQ") or ""
 
     if args.loop:
-        asyncio.run(main_loop(headless, game_url))
+        asyncio.run(main_loop(headless, game_url, login_qq))
     else:
-        asyncio.run(main_once(headless, game_url))
+        asyncio.run(main_once(headless, game_url, login_qq))

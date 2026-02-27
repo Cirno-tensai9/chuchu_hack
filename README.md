@@ -22,7 +22,14 @@ python kusa_auto.py
 
 流程：打开页面 → 自动输入 QQ 登录 → 进入生草 → 恢复承载力 → 选择巨草 → 点击「过载生草」→ 轮询直到检测到完成 → 写入 `kusa_done.json` 并退出。
 
-默认 QQ 号在 `kusa_auto.py` 里的 `LOGIN_QQ` 常量中，如需更换登录账号，请修改该值。
+登录 QQ 号可通过以下方式指定（优先级从高到低）：命令行 `--qq`、环境变量 `KUSA_QQ`、代码内常量 `LOGIN_QQ`（默认 `530958461`）。例如：
+
+```bash
+python kusa_auto.py --qq 123456789
+# 或
+set KUSA_QQ=123456789
+python kusa_auto.py
+```
 
 默认游戏 URL 为 `http://110.41.149.62/kusa`，可通过：
 
@@ -79,6 +86,7 @@ python kusa_auto.py --loop
 | `--wait-min` | 5 | 循环时每轮完成后先等待的**分钟**数 |
 | `--poll-min` | 1 | 等待结束后，每隔多少**分钟**检查一次按钮是否出现 |
 | `--trigger` | 过载生草 | 点击的按钮：`过载生草` 或 `开始生草` |
+| `--qq` | 同 `KUSA_QQ` / 代码默认 | 登录用 QQ 号 |
 
 同时支持 `--url`、`--loop`、`--no-headless`（与 `kusa_auto.py` 相同）。
 
