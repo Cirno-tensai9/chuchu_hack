@@ -21,7 +21,8 @@ except ImportError:
     sys.exit(1)
 
 # ---------- 配置 ----------
-GAME_URL = "http://110.41.149.62/kusa"
+# 默认 URL；可从环境变量 KUSA_GAME_URL 覆盖（仅在此处读取一次，避免重复 env 开销）
+_DEFAULT_GAME_URL = "http://110.41.149.62/kusa"
 # 生完草后写入的信号文件（用这个文件就知道「生完了」）
 SIGNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kusa_done.json")
 HEADLESS = os.environ.get("HEADLESS", "false").lower() in ("1", "true", "yes")
@@ -87,7 +88,7 @@ def clear_signal():
         os.remove(SIGNAL_FILE)
 
 
-async def run_once(p, headless: bool) -> bool:
+async def run_once(p, headless: bool, game_url: str) -> bool:
     """执行一轮：打开页面 → 点触发 → 等完成。返回是否检测到完成。"""
     browser = await p.chromium.launch(headless=headless)
     context = await browser.new_context(
@@ -96,7 +97,7 @@ async def run_once(p, headless: bool) -> bool:
     )
     page = await context.new_page()
     try:
-        await page.goto(GAME_URL, wait_until="networkidle", timeout=15000)
+        await page.goto(game_url, wait_until="networkidle", timeout=15000)
     except Exception as e:
         print("打开页面失败:", e)
         await browser.close()
@@ -170,22 +171,22 @@ async def run_once(p, headless: bool) -> bool:
     return bool(done_selector)
 
 
-async def main_loop(headless: bool):
+async def main_loop(headless: bool, game_url: str):
     """循环模式：每轮结束后等 LOOP_INTERVAL 秒（默认 5 分钟）再开始下一轮。"""
     print("爬虫循环模式，每轮结束后等待", LOOP_INTERVAL, "秒再下一轮，Ctrl+C 退出")
     async with async_playwright() as p:
         while True:
             clear_signal()
-            await run_once(p, headless)
+            await run_once(p, headless, game_url)
             print("下一轮在", LOOP_INTERVAL, "秒后...")
             await asyncio.sleep(LOOP_INTERVAL)
 
 
-async def main_once(headless: bool):
+async def main_once(headless: bool, game_url: str):
     """单次模式：爬一次，生完写信号并退出。"""
     async with async_playwright() as p:
         clear_signal()
-        ok = await run_once(p, headless)
+        ok = await run_once(p, headless, game_url)
         if not ok:
             print("本轮未在限定时间内检测到完成，请检查页面或 DONE_INDICATORS")
         sys.exit(0 if ok else 1)
@@ -199,10 +200,18 @@ if __name__ == "__main__":
         help="循环爬取：每隔一段时间执行一轮（间隔由环境变量 KUSA_LOOP_SEC 控制，默认 300 秒）",
     )
     parser.add_argument("--no-headless", action="store_true", help="显示浏览器窗口")
+    parser.add_argument(
+        "--url",
+        default=None,
+        metavar="URL",
+        help="游戏页面 URL（覆盖环境变量 KUSA_GAME_URL 和默认值）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
+    # 仅在此处解析 URL 一次：CLI > 环境变量 > 默认值（无重复 env 查找，无额外内存）
+    game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
 
     if args.loop:
-        asyncio.run(main_loop(headless))
+        asyncio.run(main_loop(headless, game_url))
     else:
-        asyncio.run(main_once(headless))
+        asyncio.run(main_once(headless, game_url))
