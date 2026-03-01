@@ -35,10 +35,13 @@ TAB_SELECTORS = [
 ]
 
 # 根据 trigger_mode 动态生成，见下方 get_trigger_selectors()
+# 任一项出现即视为本轮回合结束，进入「等 wait-min → 按 poll-min 轮询按钮」；以「正在生长中」为主
 DONE_INDICATORS = [
+    'text=正在生长中',
     'text=生完',
     'text=完成',
     'text=巨草',
+    'text=半灵草',
     '[class*="done"]',
     '[class*="complete"]',
 ]
@@ -92,20 +95,26 @@ async def run_once(
     kusa_type: str = "巨草",
     trigger_mode: str = "过载生草",
     login_qq: str = "",
+    browser=None,
+    page=None,
 ) -> bool:
+    """若传入 browser 与 page 则复用同一浏览器；未找到触发按钮时不会关闭，便于重试。"""
     qq = login_qq or LOGIN_QQ
     trigger_selectors = get_trigger_selectors(trigger_mode)
-    browser = await p.chromium.launch(headless=headless)
-    context = await browser.new_context(
-        viewport={"width": 1280, "height": 720},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
-    )
-    page = await context.new_page()
+    reuse = browser is not None and page is not None
+    if not reuse:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+        )
+        page = await context.new_page()
     try:
         await page.goto(game_url, wait_until="networkidle", timeout=15000)
     except Exception as e:
         print("打开页面失败:", e)
-        await browser.close()
+        if not reuse:
+            await browser.close()
         return False
 
     await asyncio.sleep(2)
@@ -188,12 +197,12 @@ async def run_once(
             continue
 
     if not triggered:
-        print(f"未找到「{trigger_mode}」按钮，保存页面到 kusa_debug.html")
-        with open("kusa_debug.html", "w", encoding="utf-8") as f:
-            f.write(await page.content())
-        await browser.close()
+        print(f"未找到「{trigger_mode}」按钮")
+        if not reuse:
+            await browser.close()
         return False
 
+    # 轮询直到出现「正在生长中」等，即进入「等 wait-min → 按 poll-min 轮询按钮」阶段
     deadline = time.monotonic() + MAX_WAIT
     t0 = time.monotonic()
     done_selector = ""
@@ -292,32 +301,51 @@ async def main_loop(
     trigger_mode: str = "过载生草",
     wait_sec: int = 300,
     poll_interval_sec: int = 60,
+    retry_sec: float = 60,
+    max_poll_count: int = 10,
     login_qq: str = "",
 ):
     print(
         f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
-        f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询，Ctrl+C 退出"
+        f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
     )
     async with async_playwright() as p:
+        browser, context, page = None, None, None
         while True:
             clear_signal()
-            ok = await run_once(p, headless, game_url, kusa_type, trigger_mode, login_qq)
+            if browser is None or not browser.is_connected():
+                browser = await p.chromium.launch(headless=headless)
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                )
+                page = await context.new_page()
+            ok = await run_once(
+                p, headless, game_url, kusa_type, trigger_mode, login_qq,
+                browser=browser, page=page,
+            )
             if not ok:
-                print("本轮未检测到完成，60 秒后重试...")
-                await asyncio.sleep(60)
+                print(f"本轮未检测到完成，{retry_sec:.0f} 秒后同一浏览器内重试...")
+                await asyncio.sleep(retry_sec)
                 continue
 
+            browser = None
             print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
             await asyncio.sleep(wait_sec)
 
-            while True:
-                print(f"轮询检查「{trigger_mode}」按钮是否已刷新可用...")
+            poll_count = 0
+            while poll_count < max_poll_count:
+                poll_count += 1
+                print(f"轮询检查「{trigger_mode}」按钮是否已刷新可用...（第 {poll_count}/{max_poll_count} 次）")
                 available = await is_trigger_available(p, headless, game_url, trigger_mode, login_qq)
                 if available:
                     print("检测到按钮已刷新，开始下一轮。")
                     break
                 print(f"按钮尚未刷新，{poll_interval_sec} 秒后再次检查...")
                 await asyncio.sleep(poll_interval_sec)
+            else:
+                print(f"超过 {max_poll_count} 次轮询仍未发现按钮，重试整轮流程")
+                continue
 
 
 async def main_once(
@@ -354,10 +382,24 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--poll-min",
-        type=int,
+        type=float,
         default=1,
         metavar="MIN",
-        help="等待后每隔多少分钟检查一次按钮是否出现（默认: 1）",
+        help="等待后每隔多少分钟检查一次按钮是否出现（支持小数如 0.5，默认: 1）",
+    )
+    parser.add_argument(
+        "--retry-min",
+        type=float,
+        default=1,
+        metavar="MIN",
+        help="loop 时未检测到完成时，多少分钟后重试（支持小数，如 0.1、0.5，默认 1）",
+    )
+    parser.add_argument(
+        "--max-poll",
+        type=int,
+        default=10,
+        metavar="N",
+        help="loop 时轮询按钮最多次数，超过仍未发现则重试整轮（默认 10）",
     )
     parser.add_argument(
         "--trigger",
@@ -385,6 +427,8 @@ if __name__ == "__main__":
     login_qq = (args.qq or "").strip() or os.environ.get("KUSA_QQ") or ""
     wait_sec = args.wait_min * 60
     poll_interval_sec = args.poll_min * 60
+    retry_sec = max(1, int(round(args.retry_min * 60)))
+    max_poll_count = max(1, args.max_poll)
 
     if args.loop:
         asyncio.run(
@@ -395,6 +439,8 @@ if __name__ == "__main__":
                 trigger_mode=args.trigger,
                 wait_sec=wait_sec,
                 poll_interval_sec=poll_interval_sec,
+                retry_sec=retry_sec,
+                max_poll_count=max_poll_count,
                 login_qq=login_qq,
             )
         )
