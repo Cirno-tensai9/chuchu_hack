@@ -58,9 +58,9 @@ RESTORE_SELECTORS = [
     'a:has-text("恢复承载力")',
     '[class*="restore"]:has-text("恢复承载力")',
 ]
-# 前 5 分钟：每 FAST_POLL 秒检查一次；超过 5 分钟未完成则改为每 SLOW_POLL 秒检查，直到完成
-FAST_POLL = 2.0
-SLOW_POLL = 60.0   # 一分钟检查一次
+# 轮询「正在生长中」等：每 FAST_POLL 秒检查一次（越小反应越快，默认 0.5）；超时后改为 SLOW_POLL
+FAST_POLL = 0.5
+SLOW_POLL = 60.0
 SLOW_AFTER = 180   # 5 分钟（秒）
 MAX_WAIT = 600
 # 循环模式：每轮结束后等多久再开始下一轮（默认 5 分钟）
@@ -114,7 +114,7 @@ async def run_once(
             await browser.close()
         return False
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     # 如在登录页，先自动输入 QQ 并点击登录，再进行后续「生草」tab 和按钮查找
     try:
@@ -126,7 +126,7 @@ async def run_once(
             await login_button.click()
             # 等待登录完成并进入主界面
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     except Exception:
         # 如果没有登录表单或操作失败，继续后续流程（可能已登录）
         pass
@@ -144,8 +144,7 @@ async def run_once(
             continue
 
     if tab_clicked:
-        # 等待生草页面内容加载
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     else:
         print("未在导航中找到「生草」入口，将直接在当前页面查找「过载生草」按钮")
 
@@ -183,7 +182,7 @@ async def run_once(
             }"
         )
         print("[爬虫] 已强制将 plantKusa 的草种参数改写为「半灵草」")
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数为半灵草时出错，跳过草种强制切换: {e}")
 
@@ -248,7 +247,7 @@ async def _check_overload_button_on_page(page, qq: str, game_url: str) -> bool:
         await page.goto(game_url, wait_until="networkidle", timeout=15000)
     except Exception:
         return False
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(1)
     try:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
         login_btn = page.locator('button:has-text("登录")').first
@@ -256,7 +255,7 @@ async def _check_overload_button_on_page(page, qq: str, game_url: str) -> bool:
             await qq_input.fill(qq)
             await login_btn.click()
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
     except Exception:
         pass
     try:
@@ -264,7 +263,7 @@ async def _check_overload_button_on_page(page, qq: str, game_url: str) -> bool:
             try:
                 if await page.locator(tab_sel).first.is_visible():
                     await page.click(tab_sel)
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(1)
                     break
             except Exception:
                 continue

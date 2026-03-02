@@ -50,7 +50,8 @@ RESTORE_SELECTORS = [
     'a:has-text("恢复承载力")',
     '[class*="restore"]:has-text("恢复承载力")',
 ]
-FAST_POLL = 2.0
+# 轮询「正在生长中」等：每 FAST_POLL 秒检查（越小反应越快）
+FAST_POLL = 0.5
 SLOW_POLL = 60.0
 SLOW_AFTER = 300
 MAX_WAIT = 600
@@ -117,7 +118,7 @@ async def run_once(
             await browser.close()
         return False
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     try:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
@@ -127,7 +128,7 @@ async def run_once(
             await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     except Exception:
         pass
 
@@ -143,7 +144,7 @@ async def run_once(
             continue
 
     if tab_clicked:
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     else:
         print("未在导航中找到「生草」入口，将直接在当前页面查找按钮")
 
@@ -181,7 +182,7 @@ async def run_once(
             }}"""
         )
         print(f"[爬虫] 已强制将 plantKusa 的草种参数改写为「{kusa_type}」")
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数时出错: {e}")
 
@@ -256,7 +257,7 @@ async def is_trigger_available(
         await browser.close()
         return False
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     try:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
@@ -265,7 +266,7 @@ async def is_trigger_available(
             await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     except Exception:
         pass
 
@@ -274,7 +275,7 @@ async def is_trigger_available(
             try:
                 if await page.locator(tab_sel).first.is_visible():
                     await page.click(tab_sel)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     break
             except Exception:
                 continue
