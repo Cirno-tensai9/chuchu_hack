@@ -375,10 +375,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--wait-min",
-        type=int,
+        type=float,
         default=5,
         metavar="MIN",
-        help="loop 时每轮完成后先等待的分钟数（默认: 5）",
+        help="loop 时每轮完成后先等待的分钟数（支持小数如 0.5，默认: 5）",
     )
     parser.add_argument(
         "--poll-min",
