@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from typing import List, Optional
 
 try:
     from playwright.async_api import async_playwright
@@ -304,15 +305,26 @@ async def main_loop(
     poll_interval_sec: int = 60,
     retry_sec: float = 60,
     max_poll_count: int = 10,
+    cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
-    print(
-        f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
-        f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
-    )
+    if cycle_types:
+        print(
+            f"爬虫循环模式：草种轮换={cycle_types}，触发={trigger_mode}，"
+            f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+        )
+    else:
+        print(
+            f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
+            f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+        )
     async with async_playwright() as p:
         browser, context, page = None, None, None
+        cycle_idx = 0
         while True:
+            current_type = cycle_types[cycle_idx % len(cycle_types)] if cycle_types else kusa_type
+            if cycle_types:
+                print(f"[本轮草种] {current_type}")
             clear_signal()
             if browser is None or not browser.is_connected():
                 browser = await p.chromium.launch(headless=headless)
@@ -322,7 +334,7 @@ async def main_loop(
                 )
                 page = await context.new_page()
             ok = await run_once(
-                p, headless, game_url, kusa_type, trigger_mode, login_qq,
+                p, headless, game_url, current_type, trigger_mode, login_qq,
                 browser=browser, page=page,
             )
             if not ok:
@@ -330,6 +342,8 @@ async def main_loop(
                 await asyncio.sleep(retry_sec)
                 continue
 
+            if cycle_types:
+                cycle_idx += 1
             browser = None
             print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
             await asyncio.sleep(wait_sec)
@@ -422,6 +436,12 @@ if __name__ == "__main__":
         metavar="QQ",
         help="登录用 QQ 号（覆盖环境变量 KUSA_QQ 和代码内默认值）",
     )
+    parser.add_argument(
+        "--cycle-kusa",
+        default=None,
+        metavar="TYPES",
+        help="loop 时轮流使用的草种，逗号分隔，如 不灵草,灵灵草；指定后忽略 --kusa-type",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -430,6 +450,11 @@ if __name__ == "__main__":
     poll_interval_sec = args.poll_min * 60
     retry_sec = max(1, int(round(args.retry_min * 60)))
     max_poll_count = max(1, args.max_poll)
+    cycle_types = None
+    if args.cycle_kusa and args.cycle_kusa.strip():
+        cycle_types = [x.strip() for x in args.cycle_kusa.split(",") if x.strip()]
+    if cycle_types is not None and len(cycle_types) == 0:
+        cycle_types = None
 
     if args.loop:
         asyncio.run(
@@ -442,6 +467,7 @@ if __name__ == "__main__":
                 poll_interval_sec=poll_interval_sec,
                 retry_sec=retry_sec,
                 max_poll_count=max_poll_count,
+                cycle_types=cycle_types,
                 login_qq=login_qq,
             )
         )
