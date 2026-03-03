@@ -99,6 +99,7 @@ async def run_once(
     login_qq: str = "",
     browser=None,
     page=None,
+    state: Optional[dict] = None,
 ) -> bool:
     """若传入 browser 与 page 则复用同一浏览器；未找到触发按钮时不会关闭，便于重试。"""
     qq = login_qq or LOGIN_QQ
@@ -224,6 +225,18 @@ async def run_once(
 
     if done_selector:
         print("检测到完成:", done_selector)
+        # 检查是否存在「灵性」标签，用于不灵草/灵灵草轮换策略
+        if state is not None:
+            has_lingxing = False
+            try:
+                # 更精确地匹配「灵性」标签：<span class="el-tag__content">灵性</span>
+                ling = page.locator('.el-tag__content:has-text("灵性")').first
+                if await ling.is_visible():
+                    has_lingxing = True
+            except Exception:
+                pass
+            state["has_lingxing"] = has_lingxing
+
         write_done_signal(done_selector, trigger_mode)
         for sel in RESTORE_SELECTORS:
             try:
@@ -296,6 +309,71 @@ async def is_trigger_available(
     return False
 
 
+async def detect_lingxing(
+    p, headless: bool, game_url: str, login_qq: str = ""
+) -> bool:
+    """单次检测当前页面是否存在「灵性」标签。"""
+    qq = login_qq or LOGIN_QQ
+    browser = await p.chromium.launch(headless=headless)
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 720},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+    )
+    page = await context.new_page()
+    try:
+        try:
+            await page.goto(game_url, wait_until="networkidle", timeout=15000)
+        except Exception as e:
+            print("灵性检测时打开页面失败:", e)
+            await browser.close()
+            return False
+
+        await asyncio.sleep(1)
+
+        try:
+            qq_input = page.locator('input[placeholder="请输入QQ号"]').first
+            login_button = page.locator('button:has-text("登录")').first
+            if await qq_input.is_visible() and await login_button.is_visible():
+                await qq_input.fill(qq)
+                await login_button.click()
+                await page.wait_for_load_state("networkidle")
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+
+        try:
+            tab_clicked = False
+            for tab_sel in TAB_SELECTORS:
+                try:
+                    if await page.locator(tab_sel).first.is_visible():
+                        await page.click(tab_sel)
+                        tab_clicked = True
+                        break
+                except Exception:
+                    continue
+            if tab_clicked:
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+
+        try:
+            ling = page.locator('.el-tag__content:has-text("灵性")').first
+            if await ling.is_visible():
+                print("[灵性检测] 检测到灵性标签")
+                await browser.close()
+                return True
+        except Exception:
+            pass
+
+        print("[灵性检测] 未检测到灵性标签")
+        await browser.close()
+        return False
+    except Exception as e:
+        print("灵性检测时发生异常:", e)
+        await browser.close()
+        return False
+
+
 async def main_loop(
     headless: bool,
     game_url: str,
@@ -308,11 +386,18 @@ async def main_loop(
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
+    special_cycle = bool(cycle_types and cycle_types == ["不灵草", "灵灵草"])
     if cycle_types:
-        print(
-            f"爬虫循环模式：草种轮换={cycle_types}，触发={trigger_mode}，"
-            f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
-        )
+        if special_cycle:
+            print(
+                f"爬虫循环模式：草种轮换={cycle_types}（特殊模式：不灵草/灵灵草，按每轮灵性标签决定），触发={trigger_mode}，"
+                f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+            )
+        else:
+            print(
+                f"爬虫循环模式：草种轮换={cycle_types}，触发={trigger_mode}，"
+                f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+            )
     else:
         print(
             f"爬虫循环模式：草种={kusa_type}，触发={trigger_mode}，"
@@ -320,11 +405,22 @@ async def main_loop(
         )
     async with async_playwright() as p:
         browser, context, page = None, None, None
-        cycle_idx = 0
         while True:
-            current_type = cycle_types[cycle_idx % len(cycle_types)] if cycle_types else kusa_type
             if cycle_types:
+                if special_cycle:
+                    # 特殊模式：在每一轮开始前先检测灵性标签，
+                    # 若有灵性标签则本轮生灵灵草，否则生不灵草
+                    has_lingxing = await detect_lingxing(p, headless, game_url, login_qq)
+                    print(f"[special cycle] 本轮灵性标签检测结果: {'有灵性' if has_lingxing else '无灵性'}")
+                    current_type = "灵灵草" if has_lingxing else "不灵草"
+                    print(f"[本轮草种] {current_type}（基于当前灵性标签）")
+                else:
+                    current_type = cycle_types[0] if len(cycle_types) == 1 else cycle_types[0]
+                    print(f"[本轮草种] {current_type}")
+            else:
+                current_type = kusa_type
                 print(f"[本轮草种] {current_type}")
+
             clear_signal()
             if browser is None or not browser.is_connected():
                 browser = await p.chromium.launch(headless=headless)
@@ -333,17 +429,16 @@ async def main_loop(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
                 )
                 page = await context.new_page()
+            state: dict = {}
             ok = await run_once(
                 p, headless, game_url, current_type, trigger_mode, login_qq,
-                browser=browser, page=page,
+                browser=browser, page=page, state=state,
             )
             if not ok:
                 print(f"本轮未检测到完成，{retry_sec:.0f} 秒后同一浏览器内重试...")
                 await asyncio.sleep(retry_sec)
                 continue
 
-            if cycle_types:
-                cycle_idx += 1
             browser = None
             print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
             await asyncio.sleep(wait_sec)
@@ -430,7 +525,7 @@ if __name__ == "__main__":
         metavar="URL",
         help="游戏页面 URL（覆盖环境变量 KUSA_GAME_URL）",
     )
-    parser.add_argument(
+    parser.add_argument( 
         "--qq",
         default=None,
         metavar="QQ",
