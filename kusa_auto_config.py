@@ -150,6 +150,32 @@ async def run_once(
     else:
         print("未在导航中找到「生草」入口，将直接在当前页面查找按钮")
 
+    # 若处于特殊循环模式（不灵草/灵灵草），在真正选择草种前，先在生草页检测一次「灵性」标签
+    effective_kusa_type = kusa_type
+    has_lingxing_flag = None
+    if state is not None and state.get("special_cycle"):
+        try:
+            ling = page.locator('.el-tag__content:has-text("灵性")').first
+            if await ling.is_visible():
+                has_lingxing_flag = True
+                print("[special cycle] 本轮灵性标签检测结果: 有灵性")
+            else:
+                has_lingxing_flag = False
+                print("[special cycle] 本轮灵性标签检测结果: 无灵性")
+        except Exception:
+            # 若检测异常，则按“无灵性”处理，避免整轮报错中断
+            has_lingxing_flag = False
+            print("[special cycle] 灵性标签检测异常，按无灵性处理")
+
+        effective_kusa_type = "灵灵草" if has_lingxing_flag else "不灵草"
+        print(f"[本轮草种] {effective_kusa_type}（基于当前灵性标签）")
+
+        state["has_lingxing"] = bool(has_lingxing_flag)
+        state["kusa_type_used"] = effective_kusa_type
+    else:
+        if state is not None:
+            state["kusa_type_used"] = kusa_type
+
     try:
         for sel in RESTORE_SELECTORS:
             try:
@@ -164,8 +190,8 @@ async def run_once(
     except Exception:
         pass
 
-    # 强制将 plantKusa 的草种参数改为用户指定的 kusa_type
-    kusa_escaped = kusa_type.replace("\\", "\\\\").replace("'", "\\'")
+    # 强制将 plantKusa 的草种参数改为本轮实际要使用的 effective_kusa_type
+    kusa_escaped = effective_kusa_type.replace("\\", "\\\\").replace("'", "\\'")
     try:
         await page.evaluate(
             f"""() => {{
@@ -183,7 +209,7 @@ async def run_once(
                 }} catch (e) {{ console.error('[kusa_auto_config] patch error', e); }}
             }}"""
         )
-        print(f"[爬虫] 已强制将 plantKusa 的草种参数改写为「{kusa_type}」")
+        print(f"[爬虫] 已强制将 plantKusa 的草种参数改写为「{effective_kusa_type}」")
         await asyncio.sleep(2)
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数时出错: {e}")
@@ -225,18 +251,6 @@ async def run_once(
 
     if done_selector:
         print("检测到完成:", done_selector)
-        # 检查是否存在「灵性」标签，用于不灵草/灵灵草轮换策略
-        if state is not None:
-            has_lingxing = False
-            try:
-                # 更精确地匹配「灵性」标签：<span class="el-tag__content">灵性</span>
-                ling = page.locator('.el-tag__content:has-text("灵性")').first
-                if await ling.is_visible():
-                    has_lingxing = True
-            except Exception:
-                pass
-            state["has_lingxing"] = has_lingxing
-
         write_done_signal(done_selector, trigger_mode)
         for sel in RESTORE_SELECTORS:
             try:
@@ -309,71 +323,6 @@ async def is_trigger_available(
     return False
 
 
-async def detect_lingxing(
-    p, headless: bool, game_url: str, login_qq: str = ""
-) -> bool:
-    """单次检测当前页面是否存在「灵性」标签。"""
-    qq = login_qq or LOGIN_QQ
-    browser = await p.chromium.launch(headless=headless)
-    context = await browser.new_context(
-        viewport={"width": 1280, "height": 720},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
-    )
-    page = await context.new_page()
-    try:
-        try:
-            await page.goto(game_url, wait_until="networkidle", timeout=15000)
-        except Exception as e:
-            print("灵性检测时打开页面失败:", e)
-            await browser.close()
-            return False
-
-        await asyncio.sleep(1)
-
-        try:
-            qq_input = page.locator('input[placeholder="请输入QQ号"]').first
-            login_button = page.locator('button:has-text("登录")').first
-            if await qq_input.is_visible() and await login_button.is_visible():
-                await qq_input.fill(qq)
-                await login_button.click()
-                await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-
-        try:
-            tab_clicked = False
-            for tab_sel in TAB_SELECTORS:
-                try:
-                    if await page.locator(tab_sel).first.is_visible():
-                        await page.click(tab_sel)
-                        tab_clicked = True
-                        break
-                except Exception:
-                    continue
-            if tab_clicked:
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-
-        try:
-            ling = page.locator('.el-tag__content:has-text("灵性")').first
-            if await ling.is_visible():
-                print("[灵性检测] 检测到灵性标签")
-                await browser.close()
-                return True
-        except Exception:
-            pass
-
-        print("[灵性检测] 未检测到灵性标签")
-        await browser.close()
-        return False
-    except Exception as e:
-        print("灵性检测时发生异常:", e)
-        await browser.close()
-        return False
-
-
 async def main_loop(
     headless: bool,
     game_url: str,
@@ -409,12 +358,9 @@ async def main_loop(
         while True:
             if cycle_types:
                 if special_cycle:
-                    # 特殊模式：在每一轮开始前先检测灵性标签，
-                    # 若有灵性标签则本轮生灵灵草，否则生不灵草
-                    has_lingxing = await detect_lingxing(p, headless, game_url, login_qq)
-                    print(f"[special cycle] 本轮灵性标签检测结果: {'有灵性' if has_lingxing else '无灵性'}")
-                    current_type = "灵灵草" if has_lingxing else "不灵草"
-                    print(f"[本轮草种] {current_type}（基于当前灵性标签）")
+                    # 特殊模式：每一轮都会在登录并进入生草页后，基于当前「灵性」标签自动决定本轮草种（不灵草 / 灵灵草）
+                    current_type = kusa_type
+                    print("[special cycle] 本轮将进入生草页后，根据灵性标签自动选择不灵草/灵灵草。")
                 else:
                     current_type = cycle_types[0] if len(cycle_types) == 1 else cycle_types[0]
                     print(f"[本轮草种] {current_type}")
@@ -431,6 +377,8 @@ async def main_loop(
                 )
                 page = await context.new_page()
             state: dict = {}
+            # special_cycle 标记传入 run_once，便于其在同一页面流程中完成「登录 → 生草页 → 检测灵性 → 选草种 → 生草」
+            state["special_cycle"] = special_cycle
             ok = await run_once(
                 p, headless, game_url, current_type, trigger_mode, login_qq,
                 browser=browser, page=page, state=state,
@@ -442,7 +390,8 @@ async def main_loop(
 
             browser = None
             # special cycle 中的不灵草速生模块：若开启 buling_fast 且本轮是不灵草，则跳过 wait_sec，直接开始轮询
-            if special_cycle and buling_fast and current_type == "不灵草":
+            used_type = state.get("kusa_type_used", current_type)
+            if special_cycle and buling_fast and used_type == "不灵草":
                 print(
                     "[special cycle] 实验性不灵草速生已启用：本轮为不灵草，跳过 "
                     f"{wait_sec} 秒等待，直接开始轮询按钮刷新（理论上有 50% 概率在一分钟内收获）。"
