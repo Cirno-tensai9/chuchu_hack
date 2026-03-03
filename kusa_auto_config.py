@@ -383,6 +383,7 @@ async def main_loop(
     poll_interval_sec: int = 60,
     retry_sec: float = 60,
     max_poll_count: int = 10,
+    buling_fast: bool = False,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
@@ -440,8 +441,15 @@ async def main_loop(
                 continue
 
             browser = None
-            print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
-            await asyncio.sleep(wait_sec)
+            # special cycle 中的不灵草速生模块：若开启 buling_fast 且本轮是不灵草，则跳过 wait_sec，直接开始轮询
+            if special_cycle and buling_fast and current_type == "不灵草":
+                print(
+                    "[special cycle] 实验性不灵草速生已启用：本轮为不灵草，跳过 "
+                    f"{wait_sec} 秒等待，直接开始轮询按钮刷新（理论上有 50% 概率在一分钟内收获）。"
+                )
+            else:
+                print(f"本轮完成，先等待 {wait_sec} 秒再开始轮询按钮刷新...")
+                await asyncio.sleep(wait_sec)
 
             poll_count = 0
             while poll_count < max_poll_count:
@@ -537,6 +545,11 @@ if __name__ == "__main__":
         metavar="TYPES",
         help="loop 时轮流使用的草种，逗号分隔，如 不灵草,灵灵草；指定后忽略 --kusa-type",
     )
+    parser.add_argument(
+        "--buling-fast",
+        action="store_true",
+        help="在 special cycle 不灵草,灵灵草 模式下，为不灵草启用实验性催生装置（生不灵草时跳过 wait-min，直接开始轮询检查）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -562,6 +575,7 @@ if __name__ == "__main__":
                 poll_interval_sec=poll_interval_sec,
                 retry_sec=retry_sec,
                 max_poll_count=max_poll_count,
+                buling_fast=args.buling_fast,
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
