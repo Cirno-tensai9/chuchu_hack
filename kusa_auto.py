@@ -182,7 +182,7 @@ async def run_once(
             }"
         )
         print("[爬虫] 已强制将 plantKusa 的草种参数改写为「半灵草」")
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数为半灵草时出错，跳过草种强制切换: {e}")
 
