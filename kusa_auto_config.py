@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:
     from playwright.async_api import async_playwright
@@ -97,6 +97,8 @@ async def run_once(
     kusa_type: str = "巨草",
     trigger_mode: str = "过载生草",
     login_qq: str = "",
+    yield_threshold: Optional[float] = None,
+    yield_max_retry: int = 3,
     browser=None,
     page=None,
     state: Optional[dict] = None,
@@ -214,16 +216,127 @@ async def run_once(
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数时出错: {e}")
 
-    triggered = False
-    for sel in trigger_selectors:
+    # 若配置了预知草精阈值，则在真正等待长成前，尝试基于「预知产量」进行多次除草重生
+    async def _read_predicted_jing() -> Tuple[Optional[float], bool]:
+        """从当前生草弹窗中读取『草之精华』的预知数值，并检测草数字是否有「连号」。
+
+        返回 (jing_value, has_lianhao)：
+        - jing_value: 草之精华的预知数值，失败则为 None
+        - has_lianhao: 草 数字部分是否存在 >=3 位相同数字连续出现的情况（视为连号）
+
+        DOM 结构类似：
+            <div>
+              <span style="color: ...">预知产量：</span>
+              <span>草 296,825, 草之精华 2</span>
+            </div>
+        """
         try:
-            if await page.locator(sel).first.is_visible():
-                print(f"[爬虫] 点击 {trigger_mode} 按钮:", sel)
-                await page.click(sel)
-                triggered = True
-                break
+            # 找到包含「预知产量」文字的 span，再取其父容器内的第二个 span 文本
+            label = page.locator('span:has-text("预知产量")').first
+            if not await label.is_visible():
+                return None
+            parent = label.locator("xpath=..")
+            info_spans = parent.locator("span")
+            count = await info_spans.count()
+            if count < 2:
+                return None
+            info_text = await info_spans.nth(1).inner_text()
+            import re
+
+            # 先从整段文本中检测「草 数字」是否存在连号（如 111、2222 等）
+            grass_match = re.search(r"草\s*([0-9,]+)", info_text)
+            has_lianhao = False
+            if grass_match:
+                digits = grass_match.group(1).replace(",", "")
+                # 扫描是否存在 >=3 个相同数字连续
+                run_char = None
+                run_len = 0
+                for ch in digits:
+                    if ch == run_char:
+                        run_len += 1
+                    else:
+                        run_char = ch
+                        run_len = 1
+                    if run_len >= 3:
+                        has_lianhao = True
+                        break
+
+            # 优先解析「草之精华 N」
+            m = re.search(r"草之精华\s*([0-9]+(?:\.[0-9]+)?)", info_text)
+            if not m:
+                # 兼容只出现一个数字的情况
+                m = re.search(r"([0-9]+(?:\.[0-9]+)?)", info_text)
+            if not m:
+                return None, has_lianhao
+            try:
+                return float(m.group(1)), has_lianhao
+            except ValueError:
+                return None, has_lianhao
         except Exception:
-            continue
+            return None, False
+
+    triggered = False
+    attempt = 0
+    while True:
+        if not triggered:
+            for sel in trigger_selectors:
+                try:
+                    if await page.locator(sel).first.is_visible():
+                        print(f"[爬虫] 点击 {trigger_mode} 按钮:", sel)
+                        await page.click(sel)
+                        triggered = True
+                        break
+                except Exception:
+                    continue
+
+        if not triggered:
+            break
+
+        # 若未配置阈值，或达到最大尝试次数，则不再进行「预知产量」循环，直接进入正常等待阶段
+        if yield_threshold is None or yield_max_retry <= 0:
+            break
+
+        attempt += 1
+        if attempt > yield_max_retry:
+            print(f"[预知草精] 已达到最大尝试次数 {yield_max_retry}，不再继续除草重生。")
+            break
+
+        # 给页面一点时间刷新预知信息
+        await asyncio.sleep(1)
+        predicted, has_lianhao = await _read_predicted_jing()
+        if has_lianhao:
+            print("[预知草精] 检测到草数字存在连号（>=3 位相同数字连续），本轮视为特殊号，忽略草精阈值检测。")
+            break
+
+        if predicted is None:
+            print("[预知草精] 未能读取到预知产量信息，本轮将按当前结果继续生长。")
+            break
+
+        print(f"[预知草精] 当前预知草精={predicted}，阈值={yield_threshold}")
+        if predicted >= yield_threshold:
+            print("[预知草精] 已达到或超过阈值，本轮保留当前草，进入正常生长等待。")
+            break
+
+        # 预知草精不达标，尝试点击「除草」，然后再次点击触发按钮重生
+        removed = False
+        for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*=\"remove\"]:has-text(\"除草\")']:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible():
+                    print(f"[预知草精] 预知草精低于阈值，点击除草按钮: {sel}")
+                    await btn.click()
+                    removed = True
+                    break
+            except Exception:
+                continue
+
+        if not removed:
+            print("[预知草精] 未找到『除草』按钮，无法进行实验性多次重生，本轮将按当前结果继续生长。")
+            break
+
+        # 等待页面状态回到可再次触发的状态，然后在下一轮 while 中重新点击触发按钮
+        await asyncio.sleep(1)
+        triggered = False
 
     if not triggered:
         print(f"未找到「{trigger_mode}」按钮")
@@ -334,6 +447,8 @@ async def main_loop(
     max_poll_count: int = 10,
     buling_fast: bool = False,
     skip_lingxing_check: bool = False,
+    yield_threshold: Optional[float] = None,
+    yield_max_retry: int = 0,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
@@ -396,7 +511,14 @@ async def main_loop(
             # effective_special_cycle 标记传入 run_once，便于其在同一页面流程中完成「登录 → 生草页 → 检测灵性 → 选草种 → 生草」
             state["special_cycle"] = effective_special_cycle
             ok = await run_once(
-                p, headless, game_url, current_type, trigger_mode, login_qq,
+                p,
+                headless,
+                game_url,
+                current_type,
+                trigger_mode,
+                login_qq,
+                yield_threshold=yield_threshold,
+                yield_max_retry=yield_max_retry,
                 browser=browser, page=page, state=state,
             )
             if not ok:
@@ -437,10 +559,21 @@ async def main_once(
     kusa_type: str = "巨草",
     trigger_mode: str = "过载生草",
     login_qq: str = "",
+    yield_threshold: Optional[float] = None,
+    yield_max_retry: int = 3,
 ):
     async with async_playwright() as p:
         clear_signal()
-        ok = await run_once(p, headless, game_url, kusa_type, trigger_mode, login_qq)
+        ok = await run_once(
+            p,
+            headless,
+            game_url,
+            kusa_type,
+            trigger_mode,
+            login_qq,
+            yield_threshold=yield_threshold,
+            yield_max_retry=yield_max_retry,
+        )
         if not ok:
             print("本轮未在限定时间内检测到完成")
         sys.exit(0 if ok else 1)
@@ -520,6 +653,20 @@ if __name__ == "__main__":
         action="store_true",
         help="在 special cycle 不灵草,灵灵草 模式下，关闭灵性标签检测，退化为按 不灵草,灵灵草 顺序轮换草种",
     )
+    parser.add_argument(
+        "--yield-threshold",
+        type=float,
+        default=None,
+        metavar="N",
+        help="启用预知草精模式：在单次模式下，若检测到预知草精低于该阈值，则自动点击「除草」并重新生草，直到大于等于该值或达到最大尝试次数",
+    )
+    parser.add_argument(
+        "--yield-max-retry",
+        type=int,
+        default=3,
+        metavar="N",
+        help="预知草精模式下，除草重生的最大尝试次数（默认 3）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -547,6 +694,8 @@ if __name__ == "__main__":
                 max_poll_count=max_poll_count,
                 buling_fast=args.buling_fast,
                 skip_lingxing_check=args.skip_lingxing_check,
+                yield_threshold=args.yield_threshold,
+                yield_max_retry=max(0, args.yield_max_retry),
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
@@ -559,5 +708,7 @@ if __name__ == "__main__":
                 kusa_type=args.kusa_type,
                 trigger_mode=args.trigger,
                 login_qq=login_qq,
+                yield_threshold=args.yield_threshold,
+                yield_max_retry=max(0, args.yield_max_retry),
             )
         )
