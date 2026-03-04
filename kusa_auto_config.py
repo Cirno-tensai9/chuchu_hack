@@ -192,6 +192,21 @@ async def run_once(
     except Exception:
         pass
 
+    async def _restore_capacity_silent():
+        """在预知草精多次尝试时，默默点击一次『恢复承载力』（若按钮可见）。"""
+        try:
+            for sel in RESTORE_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(0.5)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     # 强制将 plantKusa 的草种参数改为本轮实际要使用的 effective_kusa_type
     kusa_escaped = effective_kusa_type.replace("\\", "\\\\").replace("'", "\\'")
     try:
@@ -279,6 +294,8 @@ async def run_once(
     attempt = 0
     while True:
         if not triggered:
+            # 在每次尝试生草前，优先默默补充一次承载力（若按钮可见）
+            await _restore_capacity_silent()
             for sel in trigger_selectors:
                 try:
                     if await page.locator(sel).first.is_visible():
@@ -309,8 +326,21 @@ async def run_once(
             break
 
         if predicted is None:
-            # 实际情况往往是尚未正确进入「正在生长中」预知弹窗，此时直接视为「未达阈值」再尝试一次
-            print("[预知草精] 未能读取到预知产量信息，本轮视为未达阈值，将重新尝试点击生草。")
+            # 实际情况往往是尚未正确进入「正在生长中」预知弹窗，此时直接视为「未达阈值」
+            # 先点击一次「除草」（若可见），再重新尝试点击生草
+            print("[预知草精] 未能读取到预知产量信息，本轮视为未达阈值，将点击一次除草并重新尝试生草。")
+            removed = False
+            for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*=\"remove\"]:has-text(\"除草\")']:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible():
+                        await btn.click()
+                        removed = True
+                        break
+                except Exception:
+                    continue
+            if not removed:
+                print("[预知草精] 未找到『除草』按钮（读取失败分支），直接重新尝试生草。")
             triggered = False
             continue
 
