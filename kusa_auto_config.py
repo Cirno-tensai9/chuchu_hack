@@ -309,8 +309,10 @@ async def run_once(
             break
 
         if predicted is None:
-            print("[预知草精] 未能读取到预知产量信息，本轮将按当前结果继续生长。")
-            break
+            # 实际情况往往是尚未正确进入「正在生长中」预知弹窗，此时直接视为「未达阈值」再尝试一次
+            print("[预知草精] 未能读取到预知产量信息，本轮视为未达阈值，将重新尝试点击生草。")
+            triggered = False
+            continue
 
         print(f"[预知草精] 当前预知草精={predicted}，阈值={yield_threshold}")
         if predicted >= yield_threshold:
