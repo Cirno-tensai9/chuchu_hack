@@ -333,16 +333,25 @@ async def main_loop(
     retry_sec: float = 60,
     max_poll_count: int = 10,
     buling_fast: bool = False,
+    skip_lingxing_check: bool = False,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
     special_cycle = bool(cycle_types and cycle_types == ["不灵草", "灵灵草"])
+    # effective_special_cycle 为「真正会做灵性检测」的 special cycle，允许通过参数关闭检测
+    effective_special_cycle = bool(special_cycle and not skip_lingxing_check)
     if cycle_types:
         if special_cycle:
-            print(
-                f"爬虫循环模式：草种轮换={cycle_types}（特殊模式：不灵草/灵灵草，按每轮灵性标签决定），触发={trigger_mode}，"
-                f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
-            )
+            if effective_special_cycle:
+                print(
+                    f"爬虫循环模式：草种轮换={cycle_types}（特殊模式：不灵草/灵灵草，按每轮灵性标签决定），触发={trigger_mode}，"
+                    f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+                )
+            else:
+                print(
+                    f"爬虫循环模式：草种轮换={cycle_types}（特殊模式：不灵草/灵灵草，已关闭灵性检测，按顺序轮换草种），触发={trigger_mode}，"
+                    f"先等待 {wait_sec} 秒再每 {poll_interval_sec} 秒轮询（最多 {max_poll_count} 次），未完成时 {retry_sec:.0f} 秒后重试，Ctrl+C 退出"
+                )
         else:
             print(
                 f"爬虫循环模式：草种轮换={cycle_types}，触发={trigger_mode}，"
@@ -355,12 +364,19 @@ async def main_loop(
         )
     async with async_playwright() as p:
         browser, context, page = None, None, None
+        cycle_idx = 0
         while True:
             if cycle_types:
                 if special_cycle:
-                    # 特殊模式：每一轮都会在登录并进入生草页后，基于当前「灵性」标签自动决定本轮草种（不灵草 / 灵灵草）
-                    current_type = kusa_type
-                    print("[special cycle] 本轮将进入生草页后，根据灵性标签自动选择不灵草/灵灵草。")
+                    if effective_special_cycle:
+                        # 特殊模式 + 开启灵性检测：每一轮都会在登录并进入生草页后，基于当前「灵性」标签自动决定本轮草种（不灵草 / 灵灵草）
+                        current_type = kusa_type
+                        print("[special cycle] 本轮将进入生草页后，根据灵性标签自动选择不灵草/灵灵草。")
+                    else:
+                        # 特殊模式但关闭灵性检测：退化为按给定列表顺序轮换不灵草/灵灵草
+                        current_type = cycle_types[cycle_idx % len(cycle_types)]
+                        cycle_idx += 1
+                        print(f"[special cycle] 已关闭灵性检测，本轮草种按顺序轮换为 {current_type}")
                 else:
                     current_type = cycle_types[0] if len(cycle_types) == 1 else cycle_types[0]
                     print(f"[本轮草种] {current_type}")
@@ -377,8 +393,8 @@ async def main_loop(
                 )
                 page = await context.new_page()
             state: dict = {}
-            # special_cycle 标记传入 run_once，便于其在同一页面流程中完成「登录 → 生草页 → 检测灵性 → 选草种 → 生草」
-            state["special_cycle"] = special_cycle
+            # effective_special_cycle 标记传入 run_once，便于其在同一页面流程中完成「登录 → 生草页 → 检测灵性 → 选草种 → 生草」
+            state["special_cycle"] = effective_special_cycle
             ok = await run_once(
                 p, headless, game_url, current_type, trigger_mode, login_qq,
                 browser=browser, page=page, state=state,
@@ -499,6 +515,11 @@ if __name__ == "__main__":
         action="store_true",
         help="在 special cycle 不灵草,灵灵草 模式下，为不灵草启用实验性催生装置（生不灵草时跳过 wait-min，直接开始轮询检查）",
     )
+    parser.add_argument(
+        "--skip-lingxing-check",
+        action="store_true",
+        help="在 special cycle 不灵草,灵灵草 模式下，关闭灵性标签检测，退化为按 不灵草,灵灵草 顺序轮换草种",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -525,6 +546,7 @@ if __name__ == "__main__":
                 retry_sec=retry_sec,
                 max_poll_count=max_poll_count,
                 buling_fast=args.buling_fast,
+                skip_lingxing_check=args.skip_lingxing_check,
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
