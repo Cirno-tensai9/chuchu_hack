@@ -234,12 +234,12 @@ async def run_once(
             # 找到包含「预知产量」文字的 span，再取其父容器内的第二个 span 文本
             label = page.locator('span:has-text("预知产量")').first
             if not await label.is_visible():
-                return None
+                return None, False
             parent = label.locator("xpath=..")
             info_spans = parent.locator("span")
             count = await info_spans.count()
             if count < 2:
-                return None
+                return None, False
             info_text = await info_spans.nth(1).inner_text()
             import re
 
