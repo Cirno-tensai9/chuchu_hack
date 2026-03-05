@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 
 try:
     from playwright.async_api import async_playwright
@@ -99,6 +99,7 @@ async def run_once(
     login_qq: str = "",
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 3,
+    yield_protect_kusa: Optional[Set[str]] = None,
     browser=None,
     page=None,
     state: Optional[dict] = None,
@@ -290,6 +291,23 @@ async def run_once(
         except Exception:
             return None, False
 
+    async def _get_current_kusa_name() -> Optional[str]:
+        """从『正在生长中』标题前提取实际生长的草种名称，例如『灵草正在生长中』。"""
+        try:
+            title = page.locator('text=正在生长中').first
+            if not await title.is_visible():
+                return None
+            full = await title.inner_text()
+            if not full:
+                return None
+            idx = full.find("正在生长中")
+            if idx <= 0:
+                return None
+            name = full[:idx].strip()
+            return name or None
+        except Exception:
+            return None
+
     triggered = False
     attempt = 0
     while True:
@@ -321,6 +339,13 @@ async def run_once(
         # 给页面一点时间刷新预知信息
         await asyncio.sleep(1)
         predicted, has_lianhao = await _read_predicted_jing()
+        # 若配置了保护草种列表，则先根据「正在生长中」标题检查当前实际草种
+        if yield_protect_kusa:
+            current_kusa = await _get_current_kusa_name()
+            if current_kusa and current_kusa in yield_protect_kusa:
+                print(f"[预知草精] 当前实际生长草种为「{current_kusa}」，命中保护草种列表，忽略草精阈值和除草逻辑，直接保留。")
+                break
+
         if has_lianhao:
             print("[预知草精] 检测到草数字存在连号（>=3 位相同数字连续），本轮视为特殊号，忽略草精阈值检测。")
             break
@@ -481,6 +506,7 @@ async def main_loop(
     skip_lingxing_check: bool = False,
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 0,
+    yield_protect_kusa: Optional[Set[str]] = None,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
@@ -551,6 +577,7 @@ async def main_loop(
                 login_qq,
                 yield_threshold=yield_threshold,
                 yield_max_retry=yield_max_retry,
+                yield_protect_kusa=yield_protect_kusa,
                 browser=browser, page=page, state=state,
             )
             if not ok:
@@ -593,6 +620,7 @@ async def main_once(
     login_qq: str = "",
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 3,
+    yield_protect_kusa: Optional[Set[str]] = None,
 ):
     async with async_playwright() as p:
         clear_signal()
@@ -605,6 +633,7 @@ async def main_once(
             login_qq,
             yield_threshold=yield_threshold,
             yield_max_retry=yield_max_retry,
+            yield_protect_kusa=yield_protect_kusa,
         )
         if not ok:
             print("本轮未在限定时间内检测到完成")
@@ -699,6 +728,12 @@ if __name__ == "__main__":
         metavar="N",
         help="预知草精模式下，除草重生的最大尝试次数（默认 3）",
     )
+    parser.add_argument(
+        "--yield-protect-kusa",
+        default=None,
+        metavar="TYPES",
+        help="预知草精模式下的保护草种列表，逗号分隔；若当前实际生长草种（出现在「正在生长中」前的名称）在该列表中，则忽略草精阈值与除草逻辑，直接保留",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -707,9 +742,12 @@ if __name__ == "__main__":
     poll_interval_sec = args.poll_min * 60
     retry_sec = max(1, int(round(args.retry_min * 60)))
     max_poll_count = max(1, args.max_poll)
+    yield_protect_kusa: Optional[Set[str]] = None
     cycle_types = None
     if args.cycle_kusa and args.cycle_kusa.strip():
         cycle_types = [x.strip() for x in args.cycle_kusa.split(",") if x.strip()]
+    if args.yield_protect_kusa and args.yield_protect_kusa.strip():
+        yield_protect_kusa = {x.strip() for x in args.yield_protect_kusa.split(",") if x.strip()}
     if cycle_types is not None and len(cycle_types) == 0:
         cycle_types = None
 
@@ -728,6 +766,7 @@ if __name__ == "__main__":
                 skip_lingxing_check=args.skip_lingxing_check,
                 yield_threshold=args.yield_threshold,
                 yield_max_retry=max(0, args.yield_max_retry),
+                yield_protect_kusa=yield_protect_kusa,
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
@@ -742,5 +781,6 @@ if __name__ == "__main__":
                 login_qq=login_qq,
                 yield_threshold=args.yield_threshold,
                 yield_max_retry=max(0, args.yield_max_retry),
+                yield_protect_kusa=yield_protect_kusa,
             )
         )
