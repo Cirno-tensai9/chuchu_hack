@@ -100,6 +100,7 @@ async def run_once(
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 3,
     yield_protect_kusa: Optional[Set[str]] = None,
+    yield_lianhao_min: int = 3,
     browser=None,
     page=None,
     state: Optional[dict] = None,
@@ -116,7 +117,7 @@ async def run_once(
         )
         page = await context.new_page()
     try:
-        await page.goto(game_url, wait_until="networkidle", timeout=15000)
+        await page.goto(game_url, wait_until="networkidle", timeout=50000)
     except Exception as e:
         print("打开页面失败:", e)
         if not reuse:
@@ -259,23 +260,24 @@ async def run_once(
             info_text = await info_spans.nth(1).inner_text()
             import re
 
-            # 先从整段文本中检测「草 数字」是否存在连号（如 111、2222 等）
-            grass_match = re.search(r"草\s*([0-9,]+)", info_text)
+            # 先从整段文本中检测「草 数字」是否存在连号（连续相同数字位数 >= yield_lianhao_min）
+            # yield_lianhao_min <= 0 表示不考虑连号，始终按阈值筛选
             has_lianhao = False
-            if grass_match:
-                digits = grass_match.group(1).replace(",", "")
-                # 扫描是否存在 >=3 个相同数字连续
-                run_char = None
-                run_len = 0
-                for ch in digits:
-                    if ch == run_char:
-                        run_len += 1
-                    else:
-                        run_char = ch
-                        run_len = 1
-                    if run_len >= 3:
-                        has_lianhao = True
-                        break
+            if yield_lianhao_min > 0:
+                grass_match = re.search(r"草\s*([0-9,]+)", info_text)
+                if grass_match:
+                    digits = grass_match.group(1).replace(",", "")
+                    run_char = None
+                    run_len = 0
+                    for ch in digits:
+                        if ch == run_char:
+                            run_len += 1
+                        else:
+                            run_char = ch
+                            run_len = 1
+                        if run_len >= yield_lianhao_min:
+                            has_lianhao = True
+                            break
 
             # 优先解析「草之精华 N」
             m = re.search(r"草之精华\s*([0-9]+(?:\.[0-9]+)?)", info_text)
@@ -310,6 +312,7 @@ async def run_once(
 
     triggered = False
     attempt = 0
+    read_attempts_for_click = 0
     while True:
         if not triggered:
             # 在每次尝试生草前，优先默默补充一次承载力（若按钮可见）
@@ -320,6 +323,7 @@ async def run_once(
                         print(f"[爬虫] 点击 {trigger_mode} 按钮:", sel)
                         await page.click(sel)
                         triggered = True
+                        read_attempts_for_click = 0
                         break
                 except Exception:
                     continue
@@ -339,7 +343,7 @@ async def run_once(
         # 给页面一点时间刷新预知信息
         await asyncio.sleep(1)
         predicted, has_lianhao = await _read_predicted_jing()
-        # 若配置了保护草种列表，则先根据「正在生长中」标题检查当前实际草种
+        # 【最高优先级】草种筛选：若配置了保护草种列表，先根据「正在生长中」标题检查当前实际草种，命中则直接保留，不再看连号/阈值
         if yield_protect_kusa:
             current_kusa = await _get_current_kusa_name()
             if current_kusa and current_kusa in yield_protect_kusa:
@@ -347,13 +351,18 @@ async def run_once(
                 break
 
         if has_lianhao:
-            print("[预知草精] 检测到草数字存在连号（>=3 位相同数字连续），本轮视为特殊号，忽略草精阈值检测。")
+            print(f"[预知草精] 检测到草数字存在连号（>={yield_lianhao_min} 位相同数字连续），本轮视为特殊号，忽略草精阈值检测。")
             break
 
         if predicted is None:
-            # 实际情况往往是尚未正确进入「正在生长中」预知弹窗，此时直接视为「未达阈值」
-            # 先点击一次「除草」（若可见），再重新尝试点击生草
-            print("[预知草精] 未能读取到预知产量信息，本轮视为未达阈值，将点击一次除草并重新尝试生草。")
+            read_attempts_for_click += 1
+            # 第一次读不到时，很可能是预知弹窗尚未完全渲染，再等一轮仅重试读取一次
+            if read_attempts_for_click == 1:
+                print("[预知草精] 第一次未能读取到预知产量信息，将稍候再次尝试读取预知结果。")
+                continue
+
+            # 第二次仍读不到：视为未达阈值，先点击一次「除草」（若可见），再重新尝试点击生草
+            print("[预知草精] 连续两次未能读取到预知产量信息，本轮视为未达阈值，将点击一次除草并重新尝试生草。")
             removed = False
             for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*=\"remove\"]:has-text(\"除草\")']:
                 try:
@@ -449,7 +458,7 @@ async def is_trigger_available(
     )
     page = await context.new_page()
     try:
-        await page.goto(game_url, wait_until="networkidle", timeout=15000)
+        await page.goto(game_url, wait_until="networkidle", timeout=50000)
     except Exception as e:
         print("检查按钮可用性时打开页面失败:", e)
         await browser.close()
@@ -507,6 +516,7 @@ async def main_loop(
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 0,
     yield_protect_kusa: Optional[Set[str]] = None,
+    yield_lianhao_min: int = 3,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
@@ -578,6 +588,7 @@ async def main_loop(
                 yield_threshold=yield_threshold,
                 yield_max_retry=yield_max_retry,
                 yield_protect_kusa=yield_protect_kusa,
+                yield_lianhao_min=yield_lianhao_min,
                 browser=browser, page=page, state=state,
             )
             if not ok:
@@ -621,6 +632,7 @@ async def main_once(
     yield_threshold: Optional[float] = None,
     yield_max_retry: int = 3,
     yield_protect_kusa: Optional[Set[str]] = None,
+    yield_lianhao_min: int = 3,
 ):
     async with async_playwright() as p:
         clear_signal()
@@ -634,6 +646,7 @@ async def main_once(
             yield_threshold=yield_threshold,
             yield_max_retry=yield_max_retry,
             yield_protect_kusa=yield_protect_kusa,
+            yield_lianhao_min=yield_lianhao_min,
         )
         if not ok:
             print("本轮未在限定时间内检测到完成")
@@ -734,6 +747,13 @@ if __name__ == "__main__":
         metavar="TYPES",
         help="预知草精模式下的保护草种列表，逗号分隔；若当前实际生长草种（出现在「正在生长中」前的名称）在该列表中，则忽略草精阈值与除草逻辑，直接保留",
     )
+    parser.add_argument(
+        "--yield-lianhao-min",
+        type=int,
+        default=3,
+        metavar="N",
+        help="预知草精模式下，草数字连续相同位数达到 N 时视为连号并忽略阈值；设为 0 则不考虑连号，始终按阈值筛选（默认 3）",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -748,6 +768,7 @@ if __name__ == "__main__":
         cycle_types = [x.strip() for x in args.cycle_kusa.split(",") if x.strip()]
     if args.yield_protect_kusa and args.yield_protect_kusa.strip():
         yield_protect_kusa = {x.strip() for x in args.yield_protect_kusa.split(",") if x.strip()}
+    yield_lianhao_min = max(0, args.yield_lianhao_min)
     if cycle_types is not None and len(cycle_types) == 0:
         cycle_types = None
 
@@ -767,6 +788,7 @@ if __name__ == "__main__":
                 yield_threshold=args.yield_threshold,
                 yield_max_retry=max(0, args.yield_max_retry),
                 yield_protect_kusa=yield_protect_kusa,
+                yield_lianhao_min=yield_lianhao_min,
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
@@ -782,5 +804,6 @@ if __name__ == "__main__":
                 yield_threshold=args.yield_threshold,
                 yield_max_retry=max(0, args.yield_max_retry),
                 yield_protect_kusa=yield_protect_kusa,
+                yield_lianhao_min=yield_lianhao_min,
             )
         )
