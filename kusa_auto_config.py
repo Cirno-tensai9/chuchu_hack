@@ -52,10 +52,13 @@ RESTORE_SELECTORS = [
     '[class*="restore"]:has-text("恢复承载力")',
 ]
 # 轮询「正在生长中」等：每 FAST_POLL 秒检查（越小反应越快）
-FAST_POLL = 0.5
+FAST_POLL = 0.35
 SLOW_POLL = 60.0
 SLOW_AFTER = 300
 MAX_WAIT = 600
+# 页面加载用 load 比 networkidle 快不少，再用短 sleep 等 SPA 稳定
+GOTO_WAIT = "load"
+GOTO_STABLE_SLEEP = 0.5
 
 
 def get_trigger_selectors(trigger_mode: str):
@@ -117,14 +120,13 @@ async def run_once(
         )
         page = await context.new_page()
     try:
-        await page.goto(game_url, wait_until="networkidle", timeout=50000)
+        await page.goto(game_url, wait_until=GOTO_WAIT, timeout=50000)
+        await asyncio.sleep(GOTO_STABLE_SLEEP)
     except Exception as e:
         print("打开页面失败:", e)
         if not reuse:
             await browser.close()
         return False
-
-    await asyncio.sleep(1)
 
     try:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
@@ -134,7 +136,7 @@ async def run_once(
             await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     except Exception:
         pass
 
@@ -150,7 +152,7 @@ async def run_once(
             continue
 
     if tab_clicked:
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
     else:
         print("未在导航中找到「生草」入口，将直接在当前页面查找按钮")
 
@@ -187,7 +189,7 @@ async def run_once(
                 if await btn.is_visible():
                     print("[爬虫] 预先点击恢复承载力按钮:", sel)
                     await btn.click()
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     break
             except Exception:
                 continue
@@ -341,7 +343,7 @@ async def run_once(
             break
 
         # 给页面一点时间刷新预知信息
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.6)
         predicted, has_lianhao = await _read_predicted_jing()
         # 【最高优先级】草种筛选：若配置了保护草种列表，先根据「正在生长中」标题检查当前实际草种，命中则直接保留，不再看连号/阈值
         if yield_protect_kusa:
@@ -401,7 +403,7 @@ async def run_once(
             break
 
         # 等待页面状态回到可再次触发的状态，然后在下一轮 while 中重新点击触发按钮
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         triggered = False
 
     if not triggered:
@@ -436,7 +438,7 @@ async def run_once(
                 if await page.locator(sel).first.is_visible():
                     print("[爬虫] 点击:", sel)
                     await page.click(sel)
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     break
             except Exception:
                 continue
@@ -458,13 +460,12 @@ async def is_trigger_available(
     )
     page = await context.new_page()
     try:
-        await page.goto(game_url, wait_until="networkidle", timeout=50000)
+        await page.goto(game_url, wait_until=GOTO_WAIT, timeout=50000)
+        await asyncio.sleep(GOTO_STABLE_SLEEP)
     except Exception as e:
         print("检查按钮可用性时打开页面失败:", e)
         await browser.close()
         return False
-
-    await asyncio.sleep(1)
 
     try:
         qq_input = page.locator('input[placeholder="请输入QQ号"]').first
@@ -473,7 +474,7 @@ async def is_trigger_available(
             await qq_input.fill(qq)
             await login_button.click()
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     except Exception:
         pass
 
@@ -482,7 +483,7 @@ async def is_trigger_available(
             try:
                 if await page.locator(tab_sel).first.is_visible():
                     await page.click(tab_sel)
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     break
             except Exception:
                 continue
