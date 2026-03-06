@@ -315,6 +315,7 @@ async def run_once(
     triggered = False
     attempt = 0
     read_attempts_for_click = 0
+    protect_attempt = 0
     while True:
         if not triggered:
             # 在每次尝试生草前，优先默默补充一次承载力（若按钮可见）
@@ -332,6 +333,39 @@ async def run_once(
 
         if not triggered:
             break
+
+        # 若配置了保护草种列表：先检查当前草种是否在列表中，命中则直接保留；否则在「仅保护草种」模式下循环除草重试
+        if yield_protect_kusa:
+            await asyncio.sleep(0.6)
+            current_kusa = await _get_current_kusa_name()
+            if current_kusa and current_kusa in yield_protect_kusa:
+                print(f"[草种筛选] 当前实际生长草种为「{current_kusa}」，命中保护草种列表，直接保留。")
+                break
+            # 当前草种不在保护列表中
+            if yield_threshold is None:
+                # 仅保护草种模式：循环除草并重新生草，直到刷到保护草种或达到最大次数
+                protect_attempt += 1
+                max_protect = yield_max_retry if yield_max_retry > 0 else 10
+                if protect_attempt > max_protect:
+                    print(f"[草种筛选] 已尝试 {max_protect} 次仍未刷到保护草种，保留当前草继续生长。")
+                    break
+                print("[草种筛选] 当前草种不在保护列表中，点击除草并重新生草。")
+                removed = False
+                for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*="remove"]:has-text("除草")']:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible():
+                            await btn.click()
+                            removed = True
+                            break
+                    except Exception:
+                        continue
+                if not removed:
+                    print("[草种筛选] 未找到『除草』按钮，保留当前草继续生长。")
+                    break
+                await asyncio.sleep(0.5)
+                triggered = False
+                continue
 
         # 若未配置阈值，或达到最大尝试次数，则不再进行「预知产量」循环，直接进入正常等待阶段
         if yield_threshold is None or yield_max_retry <= 0:
