@@ -58,7 +58,7 @@ SLOW_AFTER = 300
 MAX_WAIT = 600
 # 页面加载用 load 比 networkidle 快不少，再用短 sleep 等 SPA 稳定
 GOTO_WAIT = "load"
-GOTO_STABLE_SLEEP = 0.5
+GOTO_STABLE_SLEEP = 0.8
 
 
 def get_trigger_selectors(trigger_mode: str):
@@ -517,7 +517,7 @@ async def is_trigger_available(
             try:
                 if await page.locator(tab_sel).first.is_visible():
                     await page.click(tab_sel)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
                     break
             except Exception:
                 continue
