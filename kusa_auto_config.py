@@ -354,7 +354,7 @@ async def run_once(
                 for remove_retry in range(3):
                     if remove_retry > 0:
                         print(f"[草种筛选] 未找到『除草』按钮（第 {remove_retry + 1} 次重试寻找），稍候再试。")
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1)
                     for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*="remove"]:has-text("除草")']:
                         try:
                             btn = page.locator(sel).first
@@ -369,7 +369,7 @@ async def run_once(
                 if not removed:
                     print("[草种筛选] 连续 3 次未找到『除草』按钮，保留当前草继续生长。")
                     break
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
                 triggered = False
                 continue
 
