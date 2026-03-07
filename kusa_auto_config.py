@@ -316,6 +316,7 @@ async def run_once(
     attempt = 0
     read_attempts_for_click = 0
     protect_attempt = 0
+    protect_no_remove_count = 0
     while True:
         if not triggered:
             # 在每次尝试生草前，优先默默补充一次承载力（若按钮可见）
@@ -357,12 +358,19 @@ async def run_once(
                         if await btn.is_visible():
                             await btn.click()
                             removed = True
+                            protect_no_remove_count = 0
                             break
                     except Exception:
                         continue
                 if not removed:
-                    print("[草种筛选] 未找到『除草』按钮，保留当前草继续生长。")
-                    break
+                    protect_no_remove_count += 1
+                    if protect_no_remove_count >= 3:
+                        print("[草种筛选] 连续 3 次未找到『除草』按钮，保留当前草继续生长。")
+                        break
+                    print(f"[草种筛选] 未找到『除草』按钮（第 {protect_no_remove_count} 次），稍候再试。")
+                    await asyncio.sleep(0.5)
+                    triggered = False
+                    continue
                 await asyncio.sleep(0.5)
                 triggered = False
                 continue
