@@ -316,7 +316,6 @@ async def run_once(
     attempt = 0
     read_attempts_for_click = 0
     protect_attempt = 0
-    protect_no_remove_count = 0
     while True:
         if not triggered:
             # 在每次尝试生草前，优先默默补充一次承载力（若按钮可见）
@@ -352,25 +351,24 @@ async def run_once(
                     break
                 print("[草种筛选] 当前草种不在保护列表中，点击除草并重新生草。")
                 removed = False
-                for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*="remove"]:has-text("除草")']:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible():
-                            await btn.click()
-                            removed = True
-                            protect_no_remove_count = 0
-                            break
-                    except Exception:
-                        continue
-                if not removed:
-                    protect_no_remove_count += 1
-                    if protect_no_remove_count >= 3:
-                        print("[草种筛选] 连续 3 次未找到『除草』按钮，保留当前草继续生长。")
+                for remove_retry in range(3):
+                    if remove_retry > 0:
+                        print(f"[草种筛选] 未找到『除草』按钮（第 {remove_retry + 1} 次重试寻找），稍候再试。")
+                        await asyncio.sleep(0.5)
+                    for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*="remove"]:has-text("除草")']:
+                        try:
+                            btn = page.locator(sel).first
+                            if await btn.is_visible():
+                                await btn.click()
+                                removed = True
+                                break
+                        except Exception:
+                            continue
+                    if removed:
                         break
-                    print(f"[草种筛选] 未找到『除草』按钮（第 {protect_no_remove_count} 次），稍候再试。")
-                    await asyncio.sleep(0.5)
-                    triggered = False
-                    continue
+                if not removed:
+                    print("[草种筛选] 连续 3 次未找到『除草』按钮，保留当前草继续生长。")
+                    break
                 await asyncio.sleep(0.5)
                 triggered = False
                 continue
