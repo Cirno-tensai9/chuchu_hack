@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -104,6 +105,8 @@ async def run_once(
     yield_max_retry: int = 3,
     yield_protect_kusa: Optional[Set[str]] = None,
     yield_lianhao_min: int = 3,
+    yield_grass_min: Optional[float] = None,
+    yield_biogas_min: Optional[float] = None,
     browser=None,
     page=None,
     state: Optional[dict] = None,
@@ -235,65 +238,62 @@ async def run_once(
     except Exception as e:
         print(f"[爬虫] 强制改写 plantKusa 草种参数时出错: {e}")
 
-    # 若配置了预知草精阈值，则在真正等待长成前，尝试基于「预知产量」进行多次除草重生
-    async def _read_predicted_jing() -> Tuple[Optional[float], bool]:
-        """从当前生草弹窗中读取『草之精华』的预知数值，并检测草数字是否有「连号」。
+    # 若配置了预知草精/生草数阈值，则在真正等待长成前，尝试基于「预知产量」进行多次除草重生
+    async def _read_predicted_jing() -> Tuple[Optional[float], Optional[float], bool]:
+        """从当前生草弹窗中读取『草之精华』与『草』的预知数值，并检测草数字是否有「连号」。
 
-        返回 (jing_value, has_lianhao)：
+        返回 (jing_value, grass_value, has_lianhao)：
         - jing_value: 草之精华的预知数值，失败则为 None
-        - has_lianhao: 草 数字部分是否存在 >=3 位相同数字连续出现的情况（视为连号）
+        - grass_value: 预知「草」的数量（如 296825），失败则为 None
+        - has_lianhao: 草 数字部分是否存在 >= yield_lianhao_min 位相同数字连续（视为连号）
 
-        DOM 结构类似：
-            <div>
-              <span style="color: ...">预知产量：</span>
-              <span>草 296,825, 草之精华 2</span>
-            </div>
+        DOM 结构类似：<span>草 296,825, 草之精华 2</span>
         """
         try:
-            # 找到包含「预知产量」文字的 span，再取其父容器内的第二个 span 文本
             label = page.locator('span:has-text("预知产量")').first
             if not await label.is_visible():
-                return None, False
+                return None, None, False
             parent = label.locator("xpath=..")
             info_spans = parent.locator("span")
             count = await info_spans.count()
             if count < 2:
-                return None, False
+                return None, None, False
             info_text = await info_spans.nth(1).inner_text()
             import re
 
-            # 先从整段文本中检测「草 数字」是否存在连号（连续相同数字位数 >= yield_lianhao_min）
-            # yield_lianhao_min <= 0 表示不考虑连号，始终按阈值筛选
+            grass_match = re.search(r"草\s*([0-9,]+)", info_text)
+            digits = grass_match.group(1).replace(",", "") if grass_match else ""
+            grass_value = None
+            if digits:
+                try:
+                    grass_value = float(digits)
+                except ValueError:
+                    pass
             has_lianhao = False
-            if yield_lianhao_min > 0:
-                grass_match = re.search(r"草\s*([0-9,]+)", info_text)
-                if grass_match:
-                    digits = grass_match.group(1).replace(",", "")
-                    run_char = None
-                    run_len = 0
-                    for ch in digits:
-                        if ch == run_char:
-                            run_len += 1
-                        else:
-                            run_char = ch
-                            run_len = 1
-                        if run_len >= yield_lianhao_min:
-                            has_lianhao = True
-                            break
+            if yield_lianhao_min > 0 and digits:
+                run_char = None
+                run_len = 0
+                for ch in digits:
+                    if ch == run_char:
+                        run_len += 1
+                    else:
+                        run_char = ch
+                        run_len = 1
+                    if run_len >= yield_lianhao_min:
+                        has_lianhao = True
+                        break
 
-            # 优先解析「草之精华 N」
             m = re.search(r"草之精华\s*([0-9]+(?:\.[0-9]+)?)", info_text)
             if not m:
-                # 兼容只出现一个数字的情况
                 m = re.search(r"([0-9]+(?:\.[0-9]+)?)", info_text)
             if not m:
-                return None, has_lianhao
+                return None, grass_value, has_lianhao
             try:
-                return float(m.group(1)), has_lianhao
+                return float(m.group(1)), grass_value, has_lianhao
             except ValueError:
-                return None, has_lianhao
+                return None, grass_value, has_lianhao
         except Exception:
-            return None, False
+            return None, None, False
 
     async def _get_current_kusa_name() -> Optional[str]:
         """从『正在生长中』标题前提取实际生长的草种名称，例如『灵草正在生长中』。"""
@@ -309,6 +309,23 @@ async def run_once(
                 return None
             name = full[:idx].strip()
             return name or None
+        except Exception:
+            return None
+
+    async def _read_biogas_multiplier() -> Optional[float]:
+        """从页面中读取沼气倍率，格式为「沼气×1.n」或「沼气×2」等，通常在灵性附近。"""
+        try:
+            # 先找包含「沼气」的节点（灵性附近）
+            node = page.locator("text=沼气").first
+            if not await node.is_visible():
+                return None
+            text = await node.inner_text()
+            if not text:
+                return None
+            m = re.search(r"沼气\s*[×xX]\s*([\d.]+)", text)
+            if not m:
+                return None
+            return float(m.group(1))
         except Exception:
             return None
 
@@ -341,8 +358,8 @@ async def run_once(
             if current_kusa and current_kusa in yield_protect_kusa:
                 print(f"[草种筛选] 当前实际生长草种为「{current_kusa}」，命中保护草种列表，直接保留。")
                 break
-            # 当前草种不在保护列表中
-            if yield_threshold is None:
+            # 当前草种不在保护列表中；仅当未配置草精/生草数阈值时，才做「仅保护草种」循环除草重试
+            if yield_threshold is None and yield_grass_min is None and yield_biogas_min is None:
                 # 仅保护草种模式：循环除草并重新生草，直到刷到保护草种或达到最大次数
                 protect_attempt += 1
                 max_protect = yield_max_retry if yield_max_retry > 0 else 10
@@ -373,8 +390,8 @@ async def run_once(
                 triggered = False
                 continue
 
-        # 若未配置阈值，或达到最大尝试次数，则不再进行「预知产量」循环，直接进入正常等待阶段
-        if yield_threshold is None or yield_max_retry <= 0:
+        # 若未配置任何预知阈值（草精/生草数/沼气倍率），或达到最大尝试次数，则不再进行「预知产量」循环
+        if (yield_threshold is None and yield_grass_min is None and yield_biogas_min is None) or yield_max_retry <= 0:
             break
 
         attempt += 1
@@ -384,7 +401,11 @@ async def run_once(
 
         # 给页面一点时间刷新预知信息
         await asyncio.sleep(0.6)
-        predicted, has_lianhao = await _read_predicted_jing()
+        predicted, grass_value, has_lianhao = await _read_predicted_jing()
+        print(
+            f"[预知调试] 解析结果：草精={predicted}，生草数={grass_value}，连号={has_lianhao}；"
+            f"阈值：草精={yield_threshold}，生草数={yield_grass_min}，沼气倍率={yield_biogas_min}"
+        )
         # 【最高优先级】草种筛选：若配置了保护草种列表，先根据「正在生长中」标题检查当前实际草种，命中则直接保留，不再看连号/阈值
         if yield_protect_kusa:
             current_kusa = await _get_current_kusa_name()
@@ -396,15 +417,12 @@ async def run_once(
             print(f"[预知草精] 检测到草数字存在连号（>={yield_lianhao_min} 位相同数字连续），本轮视为特殊号，忽略草精阈值检测。")
             break
 
-        if predicted is None:
+        if yield_threshold is not None and predicted is None:
             read_attempts_for_click += 1
-            # 第一次读不到时，很可能是预知弹窗尚未完全渲染，再等一轮仅重试读取一次
             if read_attempts_for_click == 1:
-                print("[预知草精] 第一次未能读取到预知产量信息，将稍候再次尝试读取预知结果。")
+                print("[预知] 第一次未能读取到预知产量（草之精华）信息，将稍候再次尝试读取。")
                 continue
-
-            # 第二次仍读不到：视为未达阈值，先点击一次「除草」（若可见），再重新尝试点击生草
-            print("[预知草精] 连续两次未能读取到预知产量信息，本轮视为未达阈值，将点击一次除草并重新尝试生草。")
+            print("[预知] 连续两次未能读取到预知产量信息，本轮视为未达标，将点击一次除草并重新尝试生草。")
             removed = False
             for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*=\"remove\"]:has-text(\"除草\")']:
                 try:
@@ -416,30 +434,47 @@ async def run_once(
                 except Exception:
                     continue
             if not removed:
-                print("[预知草精] 未找到『除草』按钮（读取失败分支），直接重新尝试生草。")
+                print("[预知] 未找到『除草』按钮（读取失败分支），直接重新尝试生草。")
             triggered = False
             continue
 
-        print(f"[预知草精] 当前预知草精={predicted}，阈值={yield_threshold}")
-        if predicted >= yield_threshold:
-            print("[预知草精] 已达到或超过阈值，本轮保留当前草，进入正常生长等待。")
+        # 筛选优先级：草种(已判) > 连号(已判) > 草精数 > 生草数 > 沼气倍率；任一不达标则除草重试
+        # 生草数：配置了 --yield-grass-min 时，若成功读取且低于阈值，或读取失败(None)，均按“不达标”处理（强制除草重试）
+        # 沼气：配置了 --yield-biogas-min 时，若成功读取且不大于阈值，或读取失败(None)，均按“不达标”处理（强制除草重试）
+        need_remove = False
+        reason = ""
+        if yield_threshold is not None and (predicted is None or predicted < yield_threshold):
+            need_remove = True
+            reason = f"预知草精={predicted}，阈值={yield_threshold}"
+        elif yield_grass_min is not None:
+            if grass_value is None or grass_value < yield_grass_min:
+                need_remove = True
+                reason = f"预知生草数={grass_value}，阈值={yield_grass_min}（读不到或低于阈值均视为未达标）"
+        elif yield_biogas_min is not None:
+            biogas_value = await _read_biogas_multiplier()
+            if biogas_value is None:
+                need_remove = True
+                reason = f"沼气倍率读取失败，阈值={yield_biogas_min}（按未达标处理）"
+            elif biogas_value <= yield_biogas_min:
+                need_remove = True
+                reason = f"沼气倍率={biogas_value}，阈值={yield_biogas_min}（需大于阈值才保留）"
+        if not need_remove:
+            print("[预知] 草精、生草数与沼气倍率均达标，本轮保留当前草，进入正常生长等待。")
             break
 
-        # 预知草精不达标，尝试点击「除草」，然后再次点击触发按钮重生
+        print(f"[预知] 未达标（{reason}），点击除草并重新生草。")
         removed = False
         for sel in ['button:has-text("除草")', 'a:has-text("除草")', '[class*=\"remove\"]:has-text(\"除草\")']:
             try:
                 btn = page.locator(sel).first
                 if await btn.is_visible():
-                    print(f"[预知草精] 预知草精低于阈值，点击除草按钮: {sel}")
                     await btn.click()
                     removed = True
                     break
             except Exception:
                 continue
-
         if not removed:
-            print("[预知草精] 未找到『除草』按钮，无法进行实验性多次重生，本轮将按当前结果继续生长。")
+            print("[预知] 未找到『除草』按钮，无法进行实验性多次重生，本轮将按当前结果继续生长。")
             break
 
         # 等待页面状态回到可再次触发的状态，然后在下一轮 while 中重新点击触发按钮
@@ -558,6 +593,8 @@ async def main_loop(
     yield_max_retry: int = 0,
     yield_protect_kusa: Optional[Set[str]] = None,
     yield_lianhao_min: int = 3,
+    yield_grass_min: Optional[float] = None,
+    yield_biogas_min: Optional[float] = None,
     cycle_types: Optional[List[str]] = None,
     login_qq: str = "",
 ):
@@ -630,6 +667,8 @@ async def main_loop(
                 yield_max_retry=yield_max_retry,
                 yield_protect_kusa=yield_protect_kusa,
                 yield_lianhao_min=yield_lianhao_min,
+                yield_grass_min=yield_grass_min,
+                yield_biogas_min=yield_biogas_min,
                 browser=browser, page=page, state=state,
             )
             if not ok:
@@ -674,6 +713,8 @@ async def main_once(
     yield_max_retry: int = 3,
     yield_protect_kusa: Optional[Set[str]] = None,
     yield_lianhao_min: int = 3,
+    yield_grass_min: Optional[float] = None,
+    yield_biogas_min: Optional[float] = None,
 ):
     async with async_playwright() as p:
         clear_signal()
@@ -688,10 +729,32 @@ async def main_once(
             yield_max_retry=yield_max_retry,
             yield_protect_kusa=yield_protect_kusa,
             yield_lianhao_min=yield_lianhao_min,
+            yield_grass_min=yield_grass_min,
+            yield_biogas_min=yield_biogas_min,
         )
         if not ok:
             print("本轮未在限定时间内检测到完成")
         sys.exit(0 if ok else 1)
+
+
+def _parse_yield_grass_min(s: str):
+    """解析 --yield-grass-min：支持纯数字或带 k（千）、m（百万）后缀，如 100、100k、1.5m。"""
+    if s is None or (isinstance(s, str) and not s.strip()):
+        return None
+    s = str(s).strip().lower()
+    mult = 1
+    if s.endswith("k"):
+        mult = 1000
+        s = s[:-1].strip()
+    elif s.endswith("m"):
+        mult = 1_000_000
+        s = s[:-1].strip()
+    try:
+        return float(s) * mult
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "预知生草数应为数字或带 k/m 单位，如 100、100k、1.5m"
+        )
 
 
 if __name__ == "__main__":
@@ -795,6 +858,20 @@ if __name__ == "__main__":
         metavar="N",
         help="预知草精模式下，草数字连续相同位数达到 N 时视为连号并忽略阈值；设为 0 则不考虑连号，始终按阈值筛选（默认 3）",
     )
+    parser.add_argument(
+        "--yield-grass-min",
+        type=_parse_yield_grass_min,
+        default=None,
+        metavar="N",
+        help="预知生草数下限：预知产量中「草 N」低于 N 时除草重试；支持 k（千）、m（百万），如 100k、1.5m；筛选优先级为 草种 > 草精数 > 生草数",
+    )
+    parser.add_argument(
+        "--yield-biogas-min",
+        type=float,
+        default=None,
+        metavar="N",
+        help="沼气倍率下限：页面中「沼气×1.n」格式，仅当倍率大于该值且其他条件满足时才保留，否则除草重试；如 1.5 表示需大于 1.5",
+    )
     args = parser.parse_args()
     headless = not args.no_headless
     game_url = (args.url or "").strip() or os.environ.get("KUSA_GAME_URL") or _DEFAULT_GAME_URL
@@ -810,6 +887,8 @@ if __name__ == "__main__":
     if args.yield_protect_kusa and args.yield_protect_kusa.strip():
         yield_protect_kusa = {x.strip() for x in args.yield_protect_kusa.split(",") if x.strip()}
     yield_lianhao_min = max(0, args.yield_lianhao_min)
+    yield_grass_min = args.yield_grass_min
+    yield_biogas_min = args.yield_biogas_min
     if cycle_types is not None and len(cycle_types) == 0:
         cycle_types = None
 
@@ -830,6 +909,8 @@ if __name__ == "__main__":
                 yield_max_retry=max(0, args.yield_max_retry),
                 yield_protect_kusa=yield_protect_kusa,
                 yield_lianhao_min=yield_lianhao_min,
+                yield_grass_min=yield_grass_min,
+                yield_biogas_min=yield_biogas_min,
                 cycle_types=cycle_types,
                 login_qq=login_qq,
             )
@@ -846,5 +927,7 @@ if __name__ == "__main__":
                 yield_max_retry=max(0, args.yield_max_retry),
                 yield_protect_kusa=yield_protect_kusa,
                 yield_lianhao_min=yield_lianhao_min,
+                yield_grass_min=yield_grass_min,
+                yield_biogas_min=yield_biogas_min,
             )
         )
